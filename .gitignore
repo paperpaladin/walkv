@@ -1,0 +1,4 @@
+/walkv
+/walkv-asan
+t/db
+*.tmp
