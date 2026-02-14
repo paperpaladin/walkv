@@ -70,6 +70,47 @@ run_pass() {
 run_pass lost
 run_pass torn
 
+# ---------------------------------------------------------------- append after recovery
+#
+# Every scenario above crashes, recovers, and verifies -- and then stops. Nothing
+# ever WRITES after a recovery, which means a recovery that leaves the log in a
+# subtly wrong state is invisible: the damage only shows when the next append
+# builds on it.
+#
+# Found by mutation testing. WALKV_BUG=truncate-cursor truncates at the read
+# cursor rather than the last good record boundary, leaving a partial header in
+# place. The whole 83-scenario matrix passed under that defect; a single append
+# afterwards fails to read back.
+run_append_pass() {
+  i=1
+  while [ "$i" -le "$TOTAL" ]; do
+    rm -f "$DB"
+    WALKV_CRASH_AT="$i" WALKV_TORN=1 "$WALKV" "$DB" bulk "$N" >/dev/null 2>&1
+
+    # Recover, then append a fresh key and read it back.
+    "$WALKV" "$DB" put zz "survived" >/dev/null 2>&1
+    got=$("$WALKV" "$DB" get zz 2>&1)
+    checked=$((checked + 1))
+    if [ "$got" != "survived" ]; then
+      printf 'FAIL [append] crash_at=%-3s key written after recovery reads back as %s\n' "$i" "$got"
+      fail=$((fail + 1))
+    fi
+
+    # And the pre-crash prefix must still be intact after that append.
+    out=$("$WALKV" "$DB" verify-prefix "$N" 2>&1)
+    checked=$((checked + 1))
+    case "$out" in
+      "prefix "*) : ;;
+      *) printf 'FAIL [append] crash_at=%-3s prefix damaged by the later append: %s\n' "$i" "$out"
+         fail=$((fail + 1)) ;;
+    esac
+    i=$((i + 1))
+  done
+  printf '[append] recovery followed by a write, at every boundary\n'
+}
+
+run_append_pass
+
 # A clean run must end with everything present.
 rm -f "$DB"
 "$WALKV" "$DB" bulk "$N" >/dev/null 2>&1

@@ -54,16 +54,19 @@ exists to be crashed, not to be used.
       why: left a partial header for the next append to build on
 - [x] 05 garbage-tail and bitflip scenarios
 - [x] 06 ASan/UBSan run of the whole harness
+- [x] 07 append-after-recovery pass: write a key after every crash point
+      why: nothing ever wrote after a recovery, so a recovery that left the log
+           subtly wrong was invisible. 83 -> 163 scenarios.
+- [x] 08 mutation testing: WALKV_BUG plants a defect, make mutants asserts the
+      outcome, including the two that are deliberately NOT caught
+      proves: no-crc and truncate-cursor caught; accept-short masked by the klen
+              check; no-fsync invisible to any process-kill harness
 
 ### Milestone 1 -- make the store worth crashing
 
 - [ ] 07 batch commit: group N puts into one fsync, and prove the prefix
       invariant still holds at batch granularity rather than record granularity
       why: this is where real stores get it wrong, and the harness should catch it
-- [ ] 08 a deliberately broken variant behind `WALKV_BUG=no-dir-fsync` that skips
-      the directory fsync after create
-      why: **a harness nobody has seen fail is not evidence.** Prove the rig
-      catches a known-planted bug before trusting it on an unknown one.
 - [ ] 09 crash during recovery itself -- recovery must be idempotent and
       re-runnable, which is a separate invariant from the prefix property
 - [ ] 10 log compaction, then crash at every boundary *during* compaction

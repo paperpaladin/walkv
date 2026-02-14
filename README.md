@@ -13,8 +13,19 @@ $ make test
 
 [lost] final prefix 20/20
 [torn] final prefix 20/20
+[append] recovery followed by a write, at every boundary
 
-83 scenarios checked, 0 failed
+163 scenarios checked, 0 failed
+
+$ make mutants           # can the harness actually fail?
+ok     (no defect)      163 scenarios checked, 0 failed
+ok     no-crc           caught (1 scenarios failed)
+ok     truncate-cursor  caught (20 scenarios failed)
+ok     accept-short     missed, as expected -- the klen sanity check masks it
+ok     no-fsync         missed, as expected -- killing a process does not lose
+                        the page cache; only a device-level test can
+
+5 passed, 0 failed
 ```
 
 ## The invariant
@@ -71,11 +82,42 @@ because the index is never freed -- see below.
 Not implemented: compaction, so the log grows forever. No concurrency, so no
 locking. No range scans or iteration. Values capped at 1MB, keys at 1KB.
 
+## Can the harness fail?
+
+163 green scenarios mean nothing until you have watched the harness go red. So
+`WALKV_BUG=<name>` plants a known defect and `make mutants` asserts the outcome.
+Four defects, and the interesting part is that **two of them slip through for two
+completely different reasons**:
+
+| defect | result | why |
+|---|---|---|
+| `no-crc` | caught | a torn record replays as whole; the prefix check sees it |
+| `truncate-cursor` | caught | **only after a new scenario was added** -- see below |
+| `accept-short` | missed | the `klen` sanity check masks it: defense in depth, not a harness miss |
+| `no-fsync` | missed | **the ceiling of the project** -- see below |
+
+`truncate-cursor` is the one that justifies the whole exercise. It truncates at the
+read cursor rather than the last good record boundary, leaving a partial header for
+the next append to build on -- and **the original 83-scenario matrix passed clean
+under it.** Every scenario crashed, recovered, verified, and then stopped. Nothing
+ever wrote *after* a recovery, so a recovery that left the log subtly wrong was
+invisible. Adding the append-after-recovery pass took the matrix from 83 to 163
+scenarios and the defect now fails 20 of them.
+
+Asserting that a defect is **not** caught matters as much. It keeps the ceiling
+written down instead of becoming folklore, and it means removing the `klen` check
+will not silently remove a protection nobody knew was load-bearing.
+
 ### The ceiling on this harness
 
 Killing the process tests the application's ordering, not the **device's**. A
 real crash can reorder or lose writes the kernel already acknowledged, which
-`_exit` cannot simulate. The real version of this uses `dm-log-writes` to
+`_exit` cannot simulate.
+
+This is not a theoretical concern -- it is measured. `WALKV_BUG=no-fsync` removes
+the `fsync` call **entirely** and all 163 scenarios still pass, because the data
+sits in the kernel's page cache and the kernel survives the process. No
+process-kill harness, however thorough, can see that. The real version of this uses `dm-log-writes` to
 capture the block-level write stream and replay the device to every flush
 boundary -- that needs root and a loop device, so it is the next milestone rather
 than something that runs in a container. See `PLAN.md`.

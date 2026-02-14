@@ -8,6 +8,11 @@ walkv: walkv.c
 test: walkv
 	@./t/crash.sh
 
+# Can the harness actually fail? Plants known defects and asserts which are
+# caught -- and which are not, with the reason.
+mutants: walkv
+	@./t/mutants.sh
+
 # Same, under ASan/UBSan, because recovery parses whatever bytes a crash left
 # behind. Leak detection is off on purpose: this is a short-lived CLI that never
 # frees its index, so every run "leaks" by design. We are looking for overflows
@@ -19,4 +24,4 @@ test-asan: walkv.c
 clean:
 	rm -f walkv walkv-asan t/db t/*.tmp
 
-.PHONY: test test-asan clean
+.PHONY: test test-asan mutants clean
