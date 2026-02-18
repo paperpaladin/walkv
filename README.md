@@ -15,10 +15,10 @@ $ make test
 [torn] final prefix 20/20
 [append] recovery followed by a write, at every boundary
 
-163 scenarios checked, 0 failed
+216 scenarios checked, 0 failed
 
 $ make mutants           # can the harness actually fail?
-ok     (no defect)      163 scenarios checked, 0 failed
+ok     (no defect)      216 scenarios checked, 0 failed
 ok     no-crc           caught (1 scenarios failed)
 ok     truncate-cursor  caught (20 scenarios failed)
 ok     accept-short     missed, as expected -- the klen sanity check masks it
@@ -79,15 +79,35 @@ Works, and the invariants hold across all 83 scenarios, including under
 `-fsanitize=address,undefined` (`make test-asan`). ASan reports leaks there
 because the index is never freed -- see below.
 
+### Batch commit
+
+`walkv DB batch N B` puts `k0..k(N-1)` and `fsync`s every `B` of them, which is
+what any store does once per-record durability becomes the bottleneck: with
+`N=20, B=4` it is 25 I/O boundaries instead of 40.
+
+Batching weakens the contract on purpose, from "once `put` returns, it survives"
+to "once a batch is acknowledged, every record in it survives". The weaker claim
+is still a claim, so it is made observable: `durable J` goes to stdout after
+every successful `fsync`, written with `write(2)` rather than `printf`, because
+the process is about to be killed at an arbitrary point and an acknowledgement
+lost in a stdio buffer is one nobody can hold us to. The harness then crashes at
+every boundary of a batched run and requires the recovered prefix to cover the
+last `J` claimed.
+
+The prefix property itself is unchanged, and that is worth saying rather than
+assuming: records still go out in order, so recovery truncating at the first bad
+one still leaves `k0..kj-1` with no hole. What batching changes is how much of
+that prefix is *owed*, not its shape.
+
 Not implemented: compaction, so the log grows forever. No concurrency, so no
 locking. No range scans or iteration. Values capped at 1MB, keys at 1KB.
 
 ## Can the harness fail?
 
-163 green scenarios mean nothing until you have watched the harness go red. So
+216 green scenarios mean nothing until you have watched the harness go red. So
 `WALKV_BUG=<name>` plants a known defect and `make mutants` asserts the outcome.
-Four defects, and the interesting part is that **two of them slip through for two
-completely different reasons**:
+Five defects, and the interesting part is that **three of them slip through, for
+reasons that are not the same**:
 
 | defect | result | why |
 |---|---|---|
@@ -95,6 +115,7 @@ completely different reasons**:
 | `truncate-cursor` | caught | **only after a new scenario was added** -- see below |
 | `accept-short` | missed | the `klen` sanity check masks it: defense in depth, not a harness miss |
 | `no-fsync` | missed | **the ceiling of the project** -- see below |
+| `ack-before-sync` | missed | the same ceiling, reached from the other direction |
 
 `truncate-cursor` is the one that justifies the whole exercise. It truncates at the
 read cursor rather than the last good record boundary, leaving a partial header for
@@ -115,12 +136,24 @@ real crash can reorder or lose writes the kernel already acknowledged, which
 `_exit` cannot simulate.
 
 This is not a theoretical concern -- it is measured. `WALKV_BUG=no-fsync` removes
-the `fsync` call **entirely** and all 163 scenarios still pass, because the data
+the `fsync` call **entirely** and all 216 scenarios still pass, because the data
 sits in the kernel's page cache and the kernel survives the process. No
-process-kill harness, however thorough, can see that. The real version of this uses `dm-log-writes` to
-capture the block-level write stream and replay the device to every flush
-boundary -- that needs root and a loop device, so it is the next milestone rather
-than something that runs in a container. See `PLAN.md`.
+process-kill harness, however thorough, can see that.
+
+`ack-before-sync` is the same ceiling found from the other side, while adding
+batch commit. The batched contract is "once a batch is acknowledged, every
+record in it survives", so the store now prints `durable J` after each `fsync`
+and the harness requires the recovered prefix to cover the last `J` it saw.
+That is a real durability check and it still cannot see an acknowledgement
+printed one instruction *before* the `fsync` that earns it -- because by then
+the records are genuinely in the file, and only the device knows the difference.
+Asserting that it is missed is what stops the new check being mistaken for more
+than it is.
+
+The real version of this uses `dm-log-writes` to capture the block-level write
+stream and replay the device to every flush boundary -- that needs root and a
+loop device, so it is the next milestone rather than something that runs in a
+container. See `PLAN.md`.
 
 ## Design notes
 

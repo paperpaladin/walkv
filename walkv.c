@@ -139,8 +139,9 @@ static bool write_all(int fd, const void *buf, size_t n, bool allow_torn) {
   return true;
 }
 
-// Appends one record and makes it durable. Returns false on I/O error.
-static bool wal_append(DB *db, const char *key, const uint8_t *val, uint32_t vlen) {
+// Appends one record without making it durable. The caller owes a wal_sync()
+// before it may tell anyone the write happened.
+static bool wal_write(DB *db, const char *key, const uint8_t *val, uint32_t vlen) {
   uint32_t klen = strlen(key);
   size_t body_len = 8 + klen + (vlen == TOMBSTONE ? 0 : vlen);
   size_t rec_len = 4 + body_len;
@@ -158,16 +159,34 @@ static bool wal_append(DB *db, const char *key, const uint8_t *val, uint32_t vle
   bool tear = io_point();
   if (!write_all(db->fd, rec, rec_len, tear)) { free(rec); return false; }
   free(rec);
+  return true;
+}
 
-  // The record is in the page cache but not on the platter until this returns.
-  // A crash between the write and the fsync must still leave a valid prefix,
-  // which is exactly what the harness checks.
-  // There is no such thing as half an fsync, so a torn request at this boundary
-  // degrades to a plain crash. Without this, WALKV_TORN silently skips every
-  // fsync boundary and the run completes uncrashed.
+// The durability boundary. Until this returns, every record written since the
+// last one is in the page cache and not on the platter.
+//
+// There is no such thing as half an fsync, so a torn request here degrades to
+// a plain crash. Without that, WALKV_TORN silently skips every fsync boundary
+// and the run completes uncrashed -- which it did, for a while.
+static bool wal_sync(DB *db) {
   if (io_point()) _exit(99);
   if (!bug_is("no-fsync") && fsync(db->fd) < 0) return false;
   return true;
+}
+
+// "durable J" to stdout, with write(2) rather than printf. The process is
+// about to be killed at an arbitrary point by the crash harness, and an
+// acknowledgement sitting in a stdio buffer that _exit discards is one nobody
+// can hold us to.
+static bool ack_durable(long j) {
+  char buf[64];
+  int m = snprintf(buf, sizeof(buf), "durable %ld\n", j);
+  return write(1, buf, (size_t)m) == m;
+}
+
+// One record, written and made durable: the original per-record contract.
+static bool wal_append(DB *db, const char *key, const uint8_t *val, uint32_t vlen) {
+  return wal_write(db, key, val, vlen) && wal_sync(db);
 }
 
 // ---------------------------------------------------------------- recovery
@@ -246,6 +265,8 @@ static int usage(void) {
     "       walkv DB get KEY\n"
     "       walkv DB del KEY\n"
     "       walkv DB bulk N          put k0..k(N-1), fsync each\n"
+    "       walkv DB batch N B       put k0..k(N-1), fsync every B of them,\n"
+    "                                printing 'durable J' after each fsync\n"
     "       walkv DB verify-prefix N check the prefix invariant\n"
     "       walkv DB recover         replay only, report record count\n"
     "\n"
@@ -285,6 +306,44 @@ int main(int argc, char **argv) {
       snprintf(v, sizeof(v), "v%ld", i);
       if (!wal_append(db, k, (uint8_t *)v, strlen(v))) { perror("bulk"); return 1; }
       index_put(db, k, (uint8_t *)v, strlen(v));
+    }
+
+  } else if (!strcmp(cmd, "batch") && argc == 5) {
+    // Group B puts into one fsync. This is where real stores go wrong: the
+    // per-record contract says "once put returns, it survives", and batching
+    // deliberately weakens that to "once a batch is acknowledged, every record
+    // in it survives". The weaker claim is still a claim, and the harness has
+    // to be able to check it.
+    //
+    // So the acknowledgement is made visible. After every successful fsync,
+    // "durable J" goes to stdout with write(2) rather than printf: the process
+    // is about to be killed at an arbitrary point by the crash harness, and a
+    // stdio buffer discarded by _exit is an acknowledgement nobody can hold us
+    // to. The harness reads the last such line and requires the recovered
+    // prefix to cover it.
+    long n = strtol(argv[3], NULL, 10);
+    long bsz = strtol(argv[4], NULL, 10);
+    if (bsz < 1) { fprintf(stderr, "batch: B must be at least 1\n"); return 2; }
+
+    for (long i = 0; i < n; i++) {
+      char k[32], v[32];
+      snprintf(k, sizeof(k), "k%ld", i);
+      snprintf(v, sizeof(v), "v%ld", i);
+      if (!wal_write(db, k, (uint8_t *)v, strlen(v))) { perror("batch"); return 1; }
+      index_put(db, k, (uint8_t *)v, strlen(v));
+
+      // Sync at the end of each batch, and at the end of the run so a final
+      // short batch is acknowledged too rather than silently left in the cache.
+      if ((i + 1) % bsz == 0 || i + 1 == n) {
+        // Claiming durability before the fsync returns is the classic version
+        // of this bug, and a process-kill harness cannot see it: see
+        // t/mutants.sh, where it is asserted to be MISSED for the same reason
+        // no-fsync is.
+        bool early = bug_is("ack-before-sync");
+        if (early && !ack_durable(i + 1)) { perror("batch: ack"); return 1; }
+        if (!wal_sync(db)) { perror("batch"); return 1; }
+        if (!early && !ack_durable(i + 1)) { perror("batch: ack"); return 1; }
+      }
     }
 
   } else if (!strcmp(cmd, "verify-prefix") && argc == 4) {
