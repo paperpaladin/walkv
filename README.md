@@ -69,6 +69,25 @@ Both in the harness, not the store, which is the usual ratio:
    return value, so half the scenarios completed without crashing at all and
    reported a perfect prefix. A tear is meaningless at an `fsync`, so it now
    degrades to a plain crash.
+
+   And for a long time afterwards **nothing asserted that the injection had
+   fired.** The hook was fixed; the check that would have caught it was not
+   added. A crash that does nothing produces a completed run, `prefix 20`,
+   monotonicity trivially satisfied because 20 is never less than 20, and a
+   final line reading `final prefix 20/20` -- byte for byte the healthy
+   output. Measured with the hook forced to `return false`:
+
+   ```
+   without the assertion:  216 scenarios checked, 0 failed
+   with    the assertion:  216 scenarios checked, 2 failed
+   ```
+
+   Each pass now reports how many of its scenarios lost records (39 of 40;
+   only a crash at the very last I/O point keeps everything) and fails if
+   fewer than half did. `TOTAL` is pinned to `2N` as well, because it is
+   self-reported by the code under test -- so "every I/O boundary" meant
+   "every boundary the implementation admits to", and a forgotten
+   `io_point()` call would shrink the matrix silently.
 2. Recovery truncated the log at the file offset *after* a short read rather
    than at the start of the bad record, which would have left a partial header
    in place for the next append to build on.
