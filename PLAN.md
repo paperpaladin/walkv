@@ -27,7 +27,7 @@ Ranked by how little the author controls them:
 
 1. `dm-log-writes` replay to every block-level flush boundary -- **not yet**,
    needs root. This is the real oracle and milestone 2 exists to reach it.
-2. `t/crash.sh` -- process-level kill at every I/O boundary. 83 scenarios.
+2. `t/crash.sh` -- process-level kill at every I/O boundary. 219 scenarios.
 3. ASan + UBSan over the recovery parser, which reads post-crash bytes.
 4. The monotonicity check, which catches ordering bugs the prefix check alone
    would pass.
@@ -47,7 +47,7 @@ exists to be crashed, not to be used.
       why: no way to test durability without the ability to die on command
 - [x] 02 the harness: every boundary, both modes, plus monotonicity
       files: t/crash.sh
-      proves: 83 scenarios, 0 failures
+      proves: 219 scenarios, 0 failures
 - [x] 03 fix: torn request at an fsync boundary must still crash
       why: half the torn scenarios were silently not crashing at all
 - [x] 04 fix: truncate at the start of the bad record, not after the short read
@@ -59,7 +59,7 @@ exists to be crashed, not to be used.
            subtly wrong was invisible. 83 -> 163 scenarios.
 - [x] 08 mutation testing: WALKV_BUG plants a defect, make mutants asserts the
       outcome, including the two that are deliberately NOT caught
-      proves: no-crc and truncate-cursor caught; accept-short masked by the klen
+      proves: no-crc and truncate-cursor caught; accept-short masked by the CRC
               check; no-fsync invisible to any process-kill harness
 
 ### Milestone 1 -- make the store worth crashing
@@ -75,7 +75,7 @@ exists to be crashed, not to be used.
       So the acknowledgement became observable: `durable J` to stdout after
       every successful fsync, via write(2) because _exit discards a stdio
       buffer, and the harness requires the recovered prefix to cover the last J
-      claimed. 163 -> 216 scenarios.
+      claimed. 163 -> 219 scenarios.
       And it found the ceiling again. WALKV_BUG=ack-before-sync prints the
       acknowledgement one instruction before the fsync that earns it -- the
       textbook form of this bug -- and the new check cannot see it, for exactly

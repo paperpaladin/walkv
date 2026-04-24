@@ -71,12 +71,26 @@ expect truncate-cursor caught
 # --- missed, deliberately ----------------------------------------------------
 
 expect accept-short missed \
-  "the klen sanity check masks it -- defense in depth, not a harness miss"
-# Carries on past a short header by zero-padding it instead of stopping. The
-# padded klen reads as 0, and the existing "klen == 0 || klen > MAX_KEY" check
-# breaks the loop anyway. The defect is neutralised by an unrelated guard, which
-# is a different thing from the harness being unable to see it. Worth asserting so
-# that removing the klen check does not silently remove this protection too.
+  "the CRC check masks it -- defense in depth, not a harness miss"
+# Carries on past a short header by zero-padding it instead of stopping.
+#
+# This used to say the klen sanity check masks it, because "the padded klen
+# reads as 0 and the existing klen == 0 check breaks the loop anyway". That is
+# not what happens. The torn tail is always 8 or 9 bytes -- measured at all 40
+# boundaries, never under 4 -- so klen, which is header bytes 4..7, is always
+# fully read and never zero. The field that gets zero-padded is vlen.
+#
+# Removing the guards one at a time under WALKV_BUG=accept-short:
+#
+#   baseline                                219 checked, 0 failed
+#   minus "klen == 0 ||"                     219 checked, 0 failed
+#   minus that and the short-body guard      219 checked, 0 failed
+#   minus those and the CRC check            219 checked, 21 failed
+#
+# So the CRC check is the one doing the masking -- the mechanism this harness
+# exists to test, not an unrelated sanity check. That makes it a weaker
+# "missed" than the old note claimed: the defect is caught by the feature
+# under test rather than neutralised by a bystander.
 
 expect no-fsync missed \
   "killing a process does not lose the page cache; only a device-level test can"

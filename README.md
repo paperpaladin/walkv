@@ -16,22 +16,25 @@ $ make test
 [torn] final prefix 20/20
 [torn] 39 of 40 scenarios lost records, so the injection fired
 [append] recovery followed by a write, at every boundary
+[append] 39 of 40 scenarios lost records, so the injection fired
 [batch] B=4: 25 I/O boundaries against 40 unbatched
 [batch-lost] final prefix 20/20, every acknowledgement honoured
+[batch-lost] 24 of 25 scenarios lost records, so the injection fired
 [batch-torn] final prefix 20/20, every acknowledgement honoured
+[batch-torn] 24 of 25 scenarios lost records, so the injection fired
 [batch] a clean run acknowledges 5 times for 20 puts
 
-216 scenarios checked, 0 failed
+219 scenarios checked, 0 failed
 
 $ make mutants           # can the harness actually fail?
-ok     (no defect)      216 scenarios checked, 0 failed
+ok     (no defect)      219 scenarios checked, 0 failed
 ok     no-crc           caught (1 scenarios failed)
 ok     truncate-cursor  caught (20 scenarios failed)
-ok     accept-short     missed, as expected -- the klen sanity check masks it
-ok     no-fsync         missed, as expected -- killing a process does not lose
-                        the page cache; only a device-level test can
+ok     accept-short     missed, as expected -- the CRC check masks it -- defense in depth, not a harness miss
+ok     no-fsync         missed, as expected -- killing a process does not lose the page cache; only a device-level test can
+ok     ack-before-sync  missed, as expected -- the same page-cache ceiling as no-fsync, reached from the other direction
 
-5 passed, 0 failed
+6 passed, 0 failed
 ```
 
 ## The invariant
@@ -57,7 +60,8 @@ claims to order.
 makes that kill land halfway through the `write` instead of before it, so the
 log ends in a partial record that CRC has to catch.
 
-Five scenario families, 83 cases at `N=20`:
+219 cases at `N=20`. The table said "Five scenario families" and listed the
+five below; the append and batch passes were added later and never reached it:
 
 | scenario | what it proves |
 |---|---|
@@ -66,6 +70,9 @@ Five scenario families, 83 cases at `N=20`:
 | torn write at each boundary | CRC truncates a partial record instead of parsing it |
 | garbage appended to a clean log | junk past the last good record is discarded |
 | single flipped bit in the tail | corruption truncates, never silently corrupts a value |
+| recovery followed by an append, at every boundary | a recovered log is writable, not just readable |
+| the same crash and torn passes with batching on | an acknowledgement is honoured even when the write behind it was deferred |
+| a clean batched run | the acknowledgements are not vacuously zero |
 
 ## Writing the harness found two bugs
 
@@ -84,13 +91,19 @@ Both in the harness, not the store, which is the usual ratio:
    output. Measured with the hook forced to `return false`:
 
    ```
-   without the assertion:  216 scenarios checked, 0 failed
-   with    the assertion:  216 scenarios checked, 2 failed
+   without the assertion:  219 scenarios checked, 0 failed
+   with    the assertion:  219 scenarios checked, 5 failed
    ```
 
-   Each pass now reports how many of its scenarios lost records (39 of 40;
-   only a crash at the very last I/O point keeps everything) and fails if
-   fewer than half did. `TOTAL` is pinned to `2N` as well, because it is
+   It was 2 failed when only the `lost` and `torn` passes carried the
+   assertion. The append pass and both batch passes did not, so a dead
+   injection still left 214 of the 216 scenarios reporting success -- the fix
+   described here had landed in one pass out of four. All five report now,
+   and a `return false` hook fails all five.
+
+   Each pass reports how many of its scenarios lost records (39 of 40 for the
+   unbatched passes, 24 of 25 for the batched ones; only a crash at the very
+   last I/O point keeps everything) and fails if fewer than half did. `TOTAL` is pinned to `2N` as well, because it is
    self-reported by the code under test -- so "every I/O boundary" meant
    "every boundary the implementation admits to", and a forgotten
    `io_point()` call would shrink the matrix silently.
@@ -100,7 +113,7 @@ Both in the harness, not the store, which is the usual ratio:
 
 ## Status
 
-Works, and the invariants hold across all 83 scenarios, including under
+Works, and the invariants hold across all 219 scenarios, including under
 `-fsanitize=address,undefined` (`make test-asan`). ASan reports leaks there
 because the index is never freed -- see below.
 
@@ -129,7 +142,7 @@ locking. No range scans or iteration. Values capped at 1MB, keys at 1KB.
 
 ## Can the harness fail?
 
-216 green scenarios mean nothing until you have watched the harness go red. So
+219 green scenarios mean nothing until you have watched the harness go red. So
 `WALKV_BUG=<name>` plants a known defect and `make mutants` asserts the outcome.
 Five defects, and the interesting part is that **three of them slip through, for
 reasons that are not the same**:
@@ -138,7 +151,7 @@ reasons that are not the same**:
 |---|---|---|
 | `no-crc` | caught | a torn record replays as whole; the prefix check sees it |
 | `truncate-cursor` | caught | **only after a new scenario was added** -- see below |
-| `accept-short` | missed | the `klen` sanity check masks it: defense in depth, not a harness miss |
+| `accept-short` | missed | the **CRC** check masks it: the torn tail is always 8 or 9 bytes, so `klen` is fully read and the zero-padded field is `vlen`. Measured by removing each guard in turn -- only removing the CRC check makes the defect visible (21 failures) |
 | `no-fsync` | missed | **the ceiling of the project** -- see below |
 | `ack-before-sync` | missed | the same ceiling, reached from the other direction |
 
@@ -161,7 +174,7 @@ real crash can reorder or lose writes the kernel already acknowledged, which
 `_exit` cannot simulate.
 
 This is not a theoretical concern -- it is measured. `WALKV_BUG=no-fsync` removes
-the `fsync` call **entirely** and all 216 scenarios still pass, because the data
+the `fsync` call **entirely** and all 219 scenarios still pass, because the data
 sits in the kernel's page cache and the kernel survives the process. No
 process-kill harness, however thorough, can see that.
 
