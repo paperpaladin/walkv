@@ -67,7 +67,7 @@ five below; the append and batch passes were added later and never reached it:
 |---|---|
 | crash before each write | a never-acknowledged write is absent, cleanly |
 | crash before each fsync | an unflushed write does not create a hole |
-| torn write at each boundary | CRC truncates a partial record instead of parsing it |
+| torn write at each boundary | a partial record is truncated, not parsed -- by the short-body guard, since the tail is always short in the body and never reaches CRC |
 | garbage appended to a clean log | junk past the last good record is discarded |
 | single flipped bit in the tail | corruption truncates, never silently corrupts a value |
 | recovery followed by an append, at every boundary | a recovered log is writable, not just readable |
@@ -149,7 +149,7 @@ reasons that are not the same**:
 
 | defect | result | why |
 |---|---|---|
-| `no-crc` | caught | a torn record replays as whole; the prefix check sees it |
+| `no-crc` | caught | by the single `bitflip` scenario, not by the torn pass: 0 of 40 torn boundaries reach a CRC comparison, so CRC is exercised by 1 scenario of 219 |
 | `truncate-cursor` | caught | **only after a new scenario was added** -- see below |
 | `accept-short` | missed | the **CRC** check masks it: the torn tail is always 8 or 9 bytes, so `klen` is fully read and the zero-padded field is `vlen`. Measured by removing each guard in turn -- only removing the CRC check makes the defect visible (21 failures) |
 | `no-fsync` | missed | **the ceiling of the project** -- see below |
