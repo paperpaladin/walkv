@@ -1,4 +1,4 @@
-# walkv -- plan
+# walkv: plan
 
 ## Contract
 
@@ -15,19 +15,19 @@ u8  val[vlen]
 
 ## Hard invariant
 
-**After any crash, the recovered state is a prefix with no holes.** Formally:
-if `put kN` returned successfully, kN is present after recovery; and the set of
+After any crash, the recovered state is a prefix with no holes. Formally:
+if `put kN` returned successfully, kN is present after recovery, and the set of
 present keys is `{k0..kj-1}` for some j, never a set with a gap.
 
-Plus **monotonicity**: `prefix(crash_at = i+1) >= prefix(crash_at = i)`.
+Plus monotonicity: `prefix(crash_at = i+1) >= prefix(crash_at = i)`.
 
 ## Oracle
 
 Ranked by how little the author controls them:
 
-1. `dm-log-writes` replay to every block-level flush boundary -- **not yet**,
+1. `dm-log-writes` replay to every block-level flush boundary, **not yet**,
    needs root. This is the real oracle and milestone 2 exists to reach it.
-2. `t/crash.sh` -- process-level kill at every I/O boundary. 219 scenarios.
+2. `t/crash.sh`, process-level kill at every I/O boundary. 219 scenarios.
 3. ASan + UBSan over the recovery parser, which reads post-crash bytes.
 4. The monotonicity check, which catches ordering bugs the prefix check alone
    would pass.
@@ -35,7 +35,7 @@ Ranked by how little the author controls them:
 ## Non-goals
 
 Concurrency and locking. Compaction. Range scans. Transactions across multiple
-keys. Networking. Anything resembling a real database's feature list -- this
+keys. Networking. Anything resembling a real database's feature list, this
 exists to be crashed, not to be used.
 
 ## Commit sequence
@@ -62,12 +62,12 @@ exists to be crashed, not to be used.
       proves: no-crc and truncate-cursor caught; accept-short masked by the CRC
               check; no-fsync invisible to any process-kill harness
 
-### Milestone 1 -- make the store worth crashing
+### Milestone 1: make the store worth crashing
 
 - [x] 07 batch commit: group N puts into one fsync, and prove the prefix
-      invariant still holds at batch granularity rather than record granularity
+      invariant still holds at batch granularity, not record granularity
       why: this is where real stores get it wrong, and the harness should catch it
-      done: `batch N B` fsyncs every B puts -- 25 I/O boundaries instead of 40
+      done: `batch N B` fsyncs every B puts: 25 I/O boundaries instead of 40
       at N=20 B=4, asserted, because a "batching" that still synced every
       record would pass every other check here. The prefix property turns out
       to be unchanged (records still go out in order, so recovery still
@@ -77,18 +77,18 @@ exists to be crashed, not to be used.
       buffer, and the harness requires the recovered prefix to cover the last J
       claimed. 163 -> 219 scenarios.
       And it found the ceiling again. WALKV_BUG=ack-before-sync prints the
-      acknowledgement one instruction before the fsync that earns it -- the
-      textbook form of this bug -- and the new check cannot see it, for exactly
+      acknowledgement one instruction before the fsync that earns it: the
+      textbook form of this bug, and the new check cannot see it, for exactly
       the reason no-fsync is invisible: by then the records really are in the
       file. It is in t/mutants.sh asserted as MISSED, so the new durability
       check cannot be mistaken for more than it is, and it will start failing
       the day item 12 lands.
-- [ ] 09 crash during recovery itself -- recovery must be idempotent and
+- [ ] 09 crash during recovery itself, recovery must be idempotent and
       re-runnable, which is a separate invariant from the prefix property
 - [ ] 10 log compaction, then crash at every boundary *during* compaction
       why: compaction is the single most dangerous operation in a log store
 
-### Milestone 2 -- the real oracle
+### Milestone 2: the real oracle
 
 - [ ] 11 `dm-log-writes` capture: loop device, dm target, run the workload,
       capture the full block-level write stream
@@ -97,7 +97,7 @@ exists to be crashed, not to be used.
       assert the invariants at each one
       why: this tests what the device really guaranteed, not what the process
       thought it did. Catches reordering that `_exit` cannot.
-- [ ] 13 `dm-flakey` pass: drop writes in a window rather than truncating cleanly
+- [ ] 13 `dm-flakey` pass: drop writes in a window instead of truncating cleanly
 - [ ] 14 point the finished harness at a real project (sqlite in a non-default
       journal mode, or lmdb) and file whatever it finds
 
