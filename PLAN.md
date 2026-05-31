@@ -84,7 +84,7 @@ exists to be crashed, not to be used.
       check cannot be mistaken for more than it is, and it will start failing
       the day item 12 lands.
 - [ ] 09 crash during recovery itself, recovery must be idempotent and
-      re-runnable, which is a separate invariant from the prefix property
+      re-runnable, a separate invariant from the prefix property
 - [ ] 10 log compaction, then crash at every boundary *during* compaction
       why: compaction is the single most dangerous operation in a log store
 

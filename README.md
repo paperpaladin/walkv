@@ -76,7 +76,7 @@ five below. The append and batch passes were added later and never reached it:
 
 ## Writing the harness found two bugs
 
-Both in the harness, not the store, which is the usual ratio:
+Both in the harness, not the store, the usual ratio:
 
 1. In torn mode the `fsync` boundary called the injection hook but discarded its
    return value, so half the scenarios completed without crashing at all and
@@ -200,7 +200,7 @@ Two deliberate corners, both marked `shortcut:` in the source:
 - `crc32()` comes from zlib, which was already a dependency. A hand-rolled
   CRC table is 15 lines of code that can be subtly wrong.
 - Nothing is freed. A CLI process that exits after one command does not need
-  to tear down its index, which is why `make test-asan` runs with
+  to tear down its index, so `make test-asan` runs with
   `detect_leaks=0`. The interesting ASan finding would be an overflow in the
   recovery parser, and there are none.
 
