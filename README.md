@@ -97,7 +97,7 @@ Both in the harness, not the store, the usual ratio:
 
    It was 2 failed when only the `lost` and `torn` passes carried the
    assertion. The append pass and both batch passes did not, so a dead
-   injection still left 214 of the 216 scenarios reporting success: the fix
+   injection still left 214 of the 216 scenarios reporting success. The fix
    described here had landed in one pass out of four. All five report now,
    and a `return false` hook fails all five.
 
