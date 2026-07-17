@@ -3,7 +3,7 @@
 A write-ahead-log key-value store, built to be crashed.
 
 The store itself is ordinary: append a CRC'd record, `fsync`, update an index.
-The project is `t/crash.sh`, which kills the process at every I/O boundary
+What matters is `t/crash.sh`, which kills the process at every I/O boundary
 and checks that what survives is always a valid prefix of what was
 acknowledged.
 
@@ -61,7 +61,7 @@ makes that kill land halfway through the `write` instead of before it, so the
 log ends in a partial record that CRC has to catch.
 
 219 cases at `N=20`. The table said "Five scenario families" and listed the
-five below. The append and batch passes were added later and never reached it:
+five below. Append and batch passes were added later and never reached it:
 
 | scenario | what it proves |
 |---|---|
@@ -97,8 +97,7 @@ Both in the harness, not the store, the usual ratio:
 
    It was 2 failed when only the `lost` and `torn` passes carried the
    assertion. The append pass and both batch passes did not, so a dead
-   injection still left 214 of the 216 scenarios reporting success. The fix
-   described here had landed in one pass out of four. All five report now,
+   injection still left 214 of the 216 scenarios reporting success. That fix had landed in one pass out of four. All five report now,
    and a `return false` hook fails all five.
 
    Each pass reports how many of its scenarios lost records (39 of 40 for the
@@ -128,8 +127,7 @@ to "once a batch is acknowledged, every record in it survives". The weaker claim
 is still a claim, so it is made observable: `durable J` goes to stdout after
 every successful `fsync`, written with `write(2)`, not `printf`, because
 the process is about to be killed at an arbitrary point and an acknowledgement
-lost in a stdio buffer is one nobody can hold us to. The harness then crashes at
-every boundary of a batched run and requires the recovered prefix to cover the
+lost in a stdio buffer is one nobody can hold us to. It then crashes at every boundary of a batched run and requires the recovered prefix to cover the
 last `J` claimed.
 
 The prefix property itself is unchanged, and that is worth saying,
