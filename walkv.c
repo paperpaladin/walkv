@@ -191,6 +191,21 @@ static bool wal_append(DB *db, const char *key, const uint8_t *val, uint32_t vle
 
 // ---------------------------------------------------------------- recovery
 
+// A complete, valid record for a four byte key with an empty value, written at
+// the current offset with raw write(2) so that it adds no io_point() and
+// cannot change the size of the scenario matrix. Only the planted defects
+// below use it.
+static void bug_record(int fd, const char *key) {
+  uint8_t rec[16];
+  uint32_t klen = 4, vlen = 0;
+  memcpy(rec + 4, &klen, 4);
+  memcpy(rec + 8, &vlen, 4);
+  memcpy(rec + 12, key, 4);
+  uint32_t crc = crc32(0, rec + 4, 12);
+  memcpy(rec, &crc, 4);
+  if (write(fd, rec, sizeof rec) != (ssize_t)sizeof rec) perror("bug_record");
+}
+
 // Replays the log into the index, stopping at the first short or corrupt
 // record. Returns the number of records applied.
 static long recover(DB *db) {
@@ -244,8 +259,29 @@ static long recover(DB *db) {
   // Drop whatever followed the last good record, so the next append starts from
   // a clean boundary instead of after garbage.
   if (bug_is("truncate-cursor")) good = lseek(db->fd, 0, SEEK_CUR);
+
+  // bug repair-tail: mend the bad tail into a well formed record before
+  // deciding to drop it. The mend is durable, the decision is not, so a crash
+  // in the window between them leaves a fabricated record that the next
+  // recovery reads as real data. Recovering once and recovering through a
+  // crash then land in different places.
+  if (bug_is("repair-tail")) {
+    if (lseek(db->fd, good, SEEK_SET) < 0) return -1;
+    bug_record(db->fd, "fix!");
+  }
+
+  // Recovery's own I/O boundary. The truncate is the only thing recovery makes
+  // durable, so it is the only point at which a crash during recovery can
+  // leave the log half dealt with. A torn truncate is not a thing, so the hook
+  // degrades to a plain crash here, as it does at an fsync.
+  if (io_point()) _exit(99);
   if (ftruncate(db->fd, good) < 0) return -1;
   if (lseek(db->fd, good, SEEK_SET) < 0) return -1;
+
+  // bug recover-marker: write an audit record saying recovery ran. Plausible,
+  // and not a fixpoint: every re-run of recovery adds another one, so
+  // recovering twice differs from recovering once.
+  if (bug_is("recover-marker")) bug_record(db->fd, "mark");
   return applied;
 }
 

@@ -27,7 +27,8 @@ Ranked by how little the author controls them:
 
 1. `dm-log-writes` replay to every block-level flush boundary, **not yet**,
    needs root. This is the real oracle and milestone 2 exists to reach it.
-2. `t/crash.sh`, process-level kill at every I/O boundary. 219 scenarios.
+2. `t/crash.sh`, process-level kill at every I/O boundary, including the
+   boundary inside recovery itself. 349 scenarios.
 3. ASan + UBSan over the recovery parser, which reads post-crash bytes.
 4. The monotonicity check, which catches ordering bugs the prefix check alone
    would pass.
@@ -83,8 +84,31 @@ exists to be crashed, not to be used.
       file. It is in t/mutants.sh asserted as MISSED, so the new durability
       check cannot be mistaken for more than it is, and it will start failing
       the day item 12 lands.
-- [ ] 09 crash during recovery itself, recovery must be idempotent and
+- [x] 09 crash during recovery itself, recovery must be idempotent and
       re-runnable, a separate invariant from the prefix property
+      files: walkv.c t/crash.sh t/mutants.sh
+      proves: recovering a damaged log, dying at any boundary of that
+              recovery, and recovering again reaches the same bytes as one
+              uninterrupted recovery, compared against that uninterrupted
+              recovery rather than against anything this harness decides.
+              And the fixpoint half: recovering an already recovered log
+              changes nothing. 219 -> 349 scenarios.
+      found: recovery's ftruncate was an I/O boundary nobody had counted, so
+              no crash had ever landed inside recovery. The pin that was
+              meant to catch exactly that, TOTAL == 2N, agreed with the
+              implementation because both came from the same picture of
+              where I/O happens: a check written from the author's model of
+              the code, not from an authority outside it. It is 2N + 1 now.
+              Two planted defects, each caught by one half of the new pass
+              and invisible to the other and to all 308 older scenarios:
+              repair-tail mends the bad tail into a valid record before
+              dropping it, so an interrupted recovery leaves a fabricated
+              record behind, and recover-marker appends an audit record on
+              every recovery, so recovery stops being a fixpoint.
+              With one mutating syscall the real recovery is idempotent by
+              construction, which is the honest result here: the matrix is
+              what covers item 10, where compaction makes recovery
+              multi-step.
 - [ ] 10 log compaction, then crash at every boundary *during* compaction
       why: compaction is the single most dangerous operation in a log store
 

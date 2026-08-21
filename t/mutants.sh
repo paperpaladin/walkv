@@ -7,8 +7,8 @@
 # without crashing and reported a perfect prefix.
 #
 # So: plant a known defect via WALKV_BUG, run the whole matrix, and assert the
-# result. Two of the five defects are expected to be CAUGHT. Three are expected
-# to slip through, for reasons worth writing down --
+# result. Four of the seven defects are expected to be CAUGHT. Three are
+# expected to slip through, for reasons worth writing down --
 # asserting that a defect is NOT caught is how the harness's ceiling stays honest
 # instead of becoming folklore.
 cd "$(dirname "$0")/.." || exit 1
@@ -80,11 +80,11 @@ expect no-crc caught
 # The detector is the single `bitflip` scenario, not the torn-write pass this
 # note used to name. A torn write here always leaves the tail short in the
 # *body*, so `got < klen + payload` fires before any CRC is computed -- zero
-# of the 40 torn boundaries ever reach a CRC comparison, measured by printing
-# on every mismatch. WALKV_BUG=no-crc fails exactly one of the 219 scenarios,
+# of the 41 torn boundaries ever reach a CRC comparison, measured by printing
+# on every mismatch. WALKV_BUG=no-crc fails exactly one of the 349 scenarios,
 # and it is `[bitflip] CORRUPT at k19`.
 #
-# What that means for coverage: CRC is exercised by 1 scenario out of 219. A
+# What that means for coverage: CRC is exercised by 1 scenario out of 349. A
 # full-length record with corrupt bytes -- what a real sector-granular torn
 # write produces -- does not occur in the matrix at all.
 
@@ -94,6 +94,27 @@ expect truncate-cursor caught
 # passed clean under this defect: every scenario crashed, recovered and verified,
 # and then stopped, so nothing ever wrote after a recovery. Adding the
 # append-after-recovery pass is what made it visible, and it now fails 20.
+
+expect repair-tail caught
+# Mends a bad tail into a well formed record before deciding to drop it. The
+# mend is durable, the decision is not, so a crash in that window leaves a
+# fabricated record and the next recovery takes it for real data.
+#
+# This is the defect that justifies crashing recovery itself. It fails 41
+# scenarios, all of them in the [idem] pass, and NOT ONE anywhere else: the
+# 308 scenarios that existed before it pass clean under this defect, because
+# every one of them recovers exactly once and uninterrupted, which is the
+# single case in which the mend is always followed by the drop.
+
+expect recover-marker caught
+# Appends an audit record saying recovery ran. Plausible on its face, and not
+# a fixpoint: each re-run adds another one.
+#
+# Caught by the other half of the [idem] pass, the one that simply recovers an
+# already recovered log and compares bytes, and again by nothing else in the
+# suite. The two defects divide the pass neatly between them, which is the
+# argument that both halves are load bearing: crashing recovery cannot see
+# this one, and re-running recovery cannot see repair-tail.
 
 # --- missed, deliberately ----------------------------------------------------
 
@@ -107,7 +128,8 @@ expect accept-short missed \
 # boundaries, never under 4 -- so klen, which is header bytes 4..7, is always
 # fully read and never zero. The field that gets zero-padded is vlen.
 #
-# Removing the guards one at a time under WALKV_BUG=accept-short:
+# Removing the guards one at a time under WALKV_BUG=accept-short, measured
+# when the matrix was 219 scenarios wide:
 #
 #   baseline                                219 checked, 0 failed
 #   minus "klen == 0 ||"                     219 checked, 0 failed
@@ -130,7 +152,7 @@ expect no-fsync missed \
 # replay the device to each flush boundary. It needs root and a loop device, so it
 # runs on the host rather than in a container. PLAN.md milestone 2.
 #
-# Until then, this assertion is the honest statement of what 216 green scenarios
+# Until then, this assertion is the honest statement of what 349 green scenarios
 # do and do not prove.
 
 expect ack-before-sync missed \
