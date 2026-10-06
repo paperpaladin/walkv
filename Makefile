@@ -1,4 +1,4 @@
-CFLAGS = -std=c11 -g -O1 -Wall -Wextra -D_FORTIFY_SOURCE=2
+CFLAGS = -std=c11 -g -O1 -Wall -Wextra -D_FORTIFY_SOURCE=2 -ffile-prefix-map=$(CURDIR)=.
 LDLIBS = -lz
 
 walkv: walkv.c
