@@ -40,7 +40,19 @@ static bool torn_mode = false;
 static long io_points = 0;
 static bool counting = false;
 
+// WALKV_BUG=<name> plants a deliberate defect. The point is not to ship bugs: it
+// is to prove the crash harness can FAIL. A harness nobody has watched fail buys
+// confidence without earning it, and this one has already been silently broken
+// once (the torn-mode fsync boundary discarded its hook's return value).
+//
+// t/mutants.sh runs the whole matrix under each of these and asserts it goes RED.
+// One of them -- no-fsync -- is expected to go UNDETECTED, and that is the
+// honest demonstration of this harness's ceiling. See the note there.
+static const char *bug;
+static bool bug_is(const char *name) { return bug && !strcmp(bug, name); }
+
 static void io_hook_init(void) {
+  bug = getenv("WALKV_BUG");
   char *s = getenv("WALKV_CRASH_AT");
   if (s) crash_at = strtol(s, NULL, 10);
   torn_mode = getenv("WALKV_TORN") != NULL;
@@ -154,7 +166,7 @@ static bool wal_append(DB *db, const char *key, const uint8_t *val, uint32_t vle
   // degrades to a plain crash. Without this, WALKV_TORN silently skips every
   // fsync boundary and the run completes uncrashed.
   if (io_point()) _exit(99);
-  if (fsync(db->fd) < 0) return false;
+  if (!bug_is("no-fsync") && fsync(db->fd) < 0) return false;
   return true;
 }
 
@@ -175,7 +187,8 @@ static long recover(DB *db) {
     good = lseek(db->fd, 0, SEEK_CUR);
     ssize_t n = read(db->fd, hdr, 12);
     if (n == 0) break;                      // clean end of log
-    if (n < 12) break;                      // torn header
+    if (n < 12 && !bug_is("accept-short")) break;   // torn header
+    if (n < 12) memset(hdr + n, 0, 12 - (size_t)n);  // bug: pad and carry on
 
     uint32_t crc, klen, vlen;
     memcpy(&crc,  hdr + 0, 4);
@@ -194,7 +207,9 @@ static long recover(DB *db) {
     ssize_t got = read(db->fd, body + 8, klen + payload);
     if (got < 0 || (size_t)got < klen + payload) { free(body); break; }  // torn body
 
-    if (crc32(0, body, body_len) != crc) { free(body); break; }          // corrupt
+    if (!bug_is("no-crc") && crc32(0, body, body_len) != crc) {
+      free(body); break;                                                 // corrupt
+    }
 
     char key[MAX_KEY + 1];
     memcpy(key, body + 8, klen);
@@ -209,6 +224,7 @@ static long recover(DB *db) {
 
   // Drop whatever followed the last good record, so the next append starts from
   // a clean boundary instead of after garbage.
+  if (bug_is("truncate-cursor")) good = lseek(db->fd, 0, SEEK_CUR);
   if (ftruncate(db->fd, good) < 0) return -1;
   if (lseek(db->fd, good, SEEK_SET) < 0) return -1;
   return applied;
