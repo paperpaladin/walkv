@@ -64,9 +64,25 @@ exists to be crashed, not to be used.
 
 ### Milestone 1 -- make the store worth crashing
 
-- [ ] 07 batch commit: group N puts into one fsync, and prove the prefix
+- [x] 07 batch commit: group N puts into one fsync, and prove the prefix
       invariant still holds at batch granularity rather than record granularity
       why: this is where real stores get it wrong, and the harness should catch it
+      done: `batch N B` fsyncs every B puts -- 25 I/O boundaries instead of 40
+      at N=20 B=4, asserted, because a "batching" that still synced every
+      record would pass every other check here. The prefix property turns out
+      to be unchanged (records still go out in order, so recovery still
+      truncates to k0..kj-1); what changes is how much of that prefix is owed.
+      So the acknowledgement became observable: `durable J` to stdout after
+      every successful fsync, via write(2) because _exit discards a stdio
+      buffer, and the harness requires the recovered prefix to cover the last J
+      claimed. 163 -> 216 scenarios.
+      And it found the ceiling again. WALKV_BUG=ack-before-sync prints the
+      acknowledgement one instruction before the fsync that earns it -- the
+      textbook form of this bug -- and the new check cannot see it, for exactly
+      the reason no-fsync is invisible: by then the records really are in the
+      file. It is in t/mutants.sh asserted as MISSED, so the new durability
+      check cannot be mistaken for more than it is, and it will start failing
+      the day item 12 lands.
 - [ ] 09 crash during recovery itself -- recovery must be idempotent and
       re-runnable, which is a separate invariant from the prefix property
 - [ ] 10 log compaction, then crash at every boundary *during* compaction

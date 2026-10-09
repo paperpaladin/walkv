@@ -111,6 +111,106 @@ run_append_pass() {
 
 run_append_pass
 
+# ------------------------------------------------------------- batch commit
+#
+# Grouping B puts into one fsync deliberately weakens the contract. Per record
+# it was "once put returns, it survives". Batched it is "once a batch is
+# acknowledged, every record in it survives" -- weaker, still a claim, and the
+# one real stores get wrong.
+#
+# The prefix property is unchanged and still checked: records go out in order,
+# so recovery truncating at the first bad one always leaves k0..kj-1. What is
+# new is that the acknowledgement is now observable. `batch` writes "durable J"
+# to stdout with write(2) after every successful fsync, unbuffered on purpose,
+# because the process is about to be killed at an arbitrary point and an
+# acknowledgement lost in a stdio buffer is one nobody can hold us to.
+#
+# So the assertion is the durability contract itself: the recovered prefix must
+# cover the last J we claimed. Anything less is a lost acknowledged write.
+BATCH=${BATCH:-4}
+
+# The batched run has its own number of I/O boundaries, and it must be smaller
+# -- otherwise "batching" is a no-op and every assertion below would pass for a
+# store that still fsyncs every record.
+rm -f "$DB"
+BTOTAL=$(WALKV_COUNT_IO=1 "$WALKV" "$DB" batch "$N" "$BATCH" 2>&1 >/dev/null | awk '/io_points/ {print $2}')
+checked=$((checked + 1))
+if [ -z "$BTOTAL" ]; then
+  printf 'FAIL [batch] could not count I/O points for a batched run\n'
+  fail=$((fail + 1))
+elif [ "$BTOTAL" -ge "$TOTAL" ]; then
+  printf 'FAIL [batch] B=%s did not reduce I/O boundaries: %s vs %s unbatched\n' \
+         "$BATCH" "$BTOTAL" "$TOTAL"
+  fail=$((fail + 1))
+else
+  printf '[batch] B=%s: %d I/O boundaries against %d unbatched\n' "$BATCH" "$BTOTAL" "$TOTAL"
+fi
+
+run_batch_pass() {
+  mode="$1"
+  prev=-1
+  i=1
+  while [ "$i" -le "$BTOTAL" ]; do
+    rm -f "$DB"
+    if [ "$mode" = torn ]; then
+      WALKV_CRASH_AT="$i" WALKV_TORN=1 "$WALKV" "$DB" batch "$N" "$BATCH" >t/ack.tmp 2>/dev/null
+    else
+      WALKV_CRASH_AT="$i" "$WALKV" "$DB" batch "$N" "$BATCH" >t/ack.tmp 2>/dev/null
+    fi
+
+    # The highest J we told anyone was durable before dying. Empty means we
+    # never acknowledged anything, so nothing is owed.
+    ack=$(awk '/^durable /{j=$2} END{print j+0}' t/ack.tmp)
+
+    out=$("$WALKV" "$DB" verify-prefix "$N" 2>&1)
+    rc=$?
+    checked=$((checked + 1))
+
+    case "$out" in
+      "prefix "*)
+        got=${out#prefix }
+        if [ "$got" -lt "$ack" ]; then
+          printf 'FAIL [batch-%s] crash_at=%-3s acknowledged %s durable, recovered %s\n' \
+                 "$mode" "$i" "$ack" "$got"
+          fail=$((fail + 1))
+        fi
+        if [ "$got" -lt "$prev" ]; then
+          printf 'FAIL [batch-%s] crash_at=%-3s prefix went backwards: %s -> %s\n' \
+                 "$mode" "$i" "$prev" "$got"
+          fail=$((fail + 1))
+        fi
+        prev=$got
+        ;;
+      *)
+        printf 'FAIL [batch-%s] crash_at=%-3s %s (rc=%s)\n' "$mode" "$i" "$out" "$rc"
+        fail=$((fail + 1))
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  printf '[batch-%s] final prefix %s/%s, every acknowledgement honoured\n' "$mode" "$prev" "$N"
+}
+
+run_batch_pass lost
+run_batch_pass torn
+
+# An acknowledgement must actually have been made at some point, or every
+# comparison above was against zero and proved nothing.
+rm -f "$DB"
+"$WALKV" "$DB" batch "$N" "$BATCH" >t/ack.tmp 2>/dev/null
+acks=$(grep -c '^durable ' t/ack.tmp)
+checked=$((checked + 1))
+if [ "$acks" -lt 2 ]; then
+  printf 'FAIL [batch] a clean run acknowledged %s times; the durability checks are vacuous\n' "$acks"
+  fail=$((fail + 1))
+else
+  printf '[batch] a clean run acknowledges %s times for %s puts\n' "$acks" "$N"
+fi
+out=$("$WALKV" "$DB" verify-prefix "$N")
+checked=$((checked + 1))
+[ "$out" = "prefix $N" ] || { printf 'FAIL [batch clean] got %s\n' "$out"; fail=$((fail + 1)); }
+rm -f t/ack.tmp
+
 # A clean run must end with everything present.
 rm -f "$DB"
 "$WALKV" "$DB" bulk "$N" >/dev/null 2>&1

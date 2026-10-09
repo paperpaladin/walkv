@@ -7,8 +7,8 @@
 # without crashing and reported a perfect prefix.
 #
 # So: plant a known defect via WALKV_BUG, run the whole matrix, and assert the
-# result. Two of the four defects are expected to be CAUGHT. Two are expected to
-# slip through, for reasons that are different and both worth writing down --
+# result. Two of the five defects are expected to be CAUGHT. Three are expected
+# to slip through, for reasons worth writing down --
 # asserting that a defect is NOT caught is how the harness's ceiling stays honest
 # instead of becoming folklore.
 cd "$(dirname "$0")/.." || exit 1
@@ -89,8 +89,26 @@ expect no-fsync missed \
 # replay the device to each flush boundary. It needs root and a loop device, so it
 # runs on the host rather than in a container. PLAN.md milestone 2.
 #
-# Until then, this assertion is the honest statement of what 163 green scenarios
+# Until then, this assertion is the honest statement of what 216 green scenarios
 # do and do not prove.
+
+expect ack-before-sync missed \
+  "the same page-cache ceiling as no-fsync, reached from the other direction"
+# Found while adding batch commit. The batched contract is "once a batch is
+# acknowledged, every record in it survives", and this defect prints the
+# acknowledgement BEFORE the fsync that earns it -- the textbook version of
+# that bug, and the reason the acknowledgement is written to stdout at all.
+#
+# The new durability assertion in t/crash.sh requires the recovered prefix to
+# cover the last acknowledged J, and it cannot see this. For exactly the reason
+# no-fsync is invisible: the records really are in the file by then, because
+# _exit does not discard the page cache, so a claim made one instruction too
+# early is still true as far as any process-kill harness can tell.
+#
+# It is worth having anyway. It states, in a form that runs, that the batch
+# durability check is bounded by the same ceiling as everything else here, and
+# it will begin failing the day dm-log-writes lands -- which is the point at
+# which this file gets updated rather than this defect fixed.
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
