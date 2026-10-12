@@ -12,8 +12,14 @@ $ make test
 20 puts -> 40 I/O boundaries
 
 [lost] final prefix 20/20
+[lost] 39 of 40 scenarios lost records, so the injection fired
 [torn] final prefix 20/20
+[torn] 39 of 40 scenarios lost records, so the injection fired
 [append] recovery followed by a write, at every boundary
+[batch] B=4: 25 I/O boundaries against 40 unbatched
+[batch-lost] final prefix 20/20, every acknowledgement honoured
+[batch-torn] final prefix 20/20, every acknowledgement honoured
+[batch] a clean run acknowledges 5 times for 20 puts
 
 216 scenarios checked, 0 failed
 
