@@ -121,9 +121,22 @@ run_pass torn
 # afterwards fails to read back.
 run_append_pass() {
   i=1
+  shrank=0        # scenarios where the crash actually cost us records
   while [ "$i" -le "$TOTAL" ]; do
     rm -f "$DB"
     WALKV_CRASH_AT="$i" WALKV_TORN=1 "$WALKV" "$DB" bulk "$N" >/dev/null 2>&1
+
+    # Did the crash cost anything? run_pass has asked this since the fix that
+    # section is named for, and this pass and the batch pass below never did
+    # -- so a dead injection left 214 of the 216 scenarios passing. Measured
+    # with io_point() neutralised: only [lost] and [torn] went red, and the
+    # 80 append and 50 batch scenarios all reported success against a
+    # completed run.
+    _pre=$("$WALKV" "$DB" verify-prefix "$N" 2>&1)
+    case "$_pre" in
+      "prefix $N") : ;;
+      *) shrank=$((shrank + 1)) ;;
+    esac
 
     # Recover, then append a fresh key and read it back.
     "$WALKV" "$DB" put zz "survived" >/dev/null 2>&1
@@ -144,7 +157,18 @@ run_append_pass() {
     esac
     i=$((i + 1))
   done
-  printf '[append] recovery followed by a write, at every boundary\n'
+  checked=$((checked + 1))
+  if [ "$shrank" -gt $((TOTAL / 2)) ]; then
+    printf '[append] recovery followed by a write, at every boundary\n'
+    printf '[append] %s of %s scenarios lost records, so the injection fired\n' \
+           "$shrank" "$TOTAL"
+  else
+    printf 'FAIL [append] only %s of %s scenarios lost any record: the crash\n' \
+           "$shrank" "$TOTAL"
+    printf '     injection is not firing, so appending to a log that never\n'
+    printf '     lost anything proves nothing about recovery\n'
+    fail=$((fail + 1))
+  fi
 }
 
 run_append_pass
@@ -187,6 +211,7 @@ fi
 run_batch_pass() {
   mode="$1"
   prev=-1
+  shrank=0        # scenarios where the crash actually cost us records
   i=1
   while [ "$i" -le "$BTOTAL" ]; do
     rm -f "$DB"
@@ -207,6 +232,10 @@ run_batch_pass() {
     case "$out" in
       "prefix "*)
         got=${out#prefix }
+        # Same floor as run_pass and the append pass: a crash that cost
+        # nothing makes "every acknowledgement honoured" a statement about a
+        # completed run.
+        [ "$got" -lt "$N" ] && shrank=$((shrank + 1))
         if [ "$got" -lt "$ack" ]; then
           printf 'FAIL [batch-%s] crash_at=%-3s acknowledged %s durable, recovered %s\n' \
                  "$mode" "$i" "$ack" "$got"
@@ -226,7 +255,18 @@ run_batch_pass() {
     esac
     i=$((i + 1))
   done
-  printf '[batch-%s] final prefix %s/%s, every acknowledgement honoured\n' "$mode" "$prev" "$N"
+  checked=$((checked + 1))
+  if [ "$shrank" -gt $((BTOTAL / 2)) ]; then
+    printf '[batch-%s] final prefix %s/%s, every acknowledgement honoured\n' "$mode" "$prev" "$N"
+    printf '[batch-%s] %s of %s scenarios lost records, so the injection fired\n' \
+           "$mode" "$shrank" "$BTOTAL"
+  else
+    printf 'FAIL [batch-%s] only %s of %s scenarios lost any record: the crash\n' \
+           "$mode" "$shrank" "$BTOTAL"
+    printf '     injection is not firing, so "every acknowledgement honoured"\n'
+    printf '     is a statement about a run that completed\n'
+    fail=$((fail + 1))
+  fi
 }
 
 run_batch_pass lost
