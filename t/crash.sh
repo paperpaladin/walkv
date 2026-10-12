@@ -22,6 +22,17 @@ checked=0
 # How many I/O boundaries does a clean run of N puts have?
 rm -f "$DB"
 TOTAL=$(WALKV_COUNT_IO=1 "$WALKV" "$DB" bulk "$N" 2>&1 >/dev/null | awk '/io_points/ {print $2}')
+# TOTAL comes from the implementation, so "every I/O boundary" means "every
+# boundary the implementation admits to" -- a forgotten io_point() call
+# shrinks the matrix silently and the suite still reports every scenario it
+# ran as passing. A bulk of N puts is two boundaries each, the write and the
+# fsync, so the count is pinned rather than trusted.
+if [ "${TOTAL:-0}" -ne $((2 * N)) ]; then
+  printf 'FAIL bulk reports %s io points for N=%s, expected %s: a boundary\n' \
+         "${TOTAL:-0}" "$N" "$((2 * N))"
+  printf '     was added or lost, and the scenario matrix is the wrong size\n'
+  fail=$((fail + 1))
+fi
 if [ -z "$TOTAL" ]; then
   echo "could not count I/O points -- is $WALKV built?"
   exit 1
@@ -31,6 +42,7 @@ printf '%d puts -> %d I/O boundaries\n\n' "$N" "$TOTAL"
 run_pass() {
   mode="$1"       # "lost" or "torn"
   prev=-1
+  shrank=0        # scenarios where the crash actually cost us records
   i=1
   while [ "$i" -le "$TOTAL" ]; do
     rm -f "$DB"
@@ -55,6 +67,7 @@ run_pass() {
                  "$mode" "$i" "$prev" "$got"
           fail=$((fail + 1))
         fi
+        [ "$got" -lt "$N" ] && shrank=$((shrank + 1))
         prev=$got
         ;;
       *)
@@ -65,6 +78,31 @@ run_pass() {
     i=$((i + 1))
   done
   printf '[%s] final prefix %s/%s\n' "$mode" "$prev" "$N"
+
+  # DID THE CRASH DO ANYTHING? Nothing here asked, and the answer has been
+  # "no" before: README records that in torn mode the fsync boundary called
+  # the injection hook and discarded its return value, so half the
+  # scenarios completed without crashing at all and reported a perfect
+  # prefix. The hook was fixed and no assertion was added.
+  #
+  # An injection that does nothing produces a completed run, "prefix 20",
+  # monotonicity trivially satisfied because 20 is never less than 20, and
+  # a final line reading "final prefix 20/20" -- byte for byte the healthy
+  # output. Every scenario passes and the matrix measures nothing.
+  #
+  # Measured: 39 of the 40 boundaries lose records, and only a crash at the
+  # very last io point keeps all N. Half is a floor with room under it, and
+  # it is not satisfiable by an injection that never fires.
+  if [ "$shrank" -gt $((TOTAL / 2)) ]; then
+    printf '[%s] %s of %s scenarios lost records, so the injection fired\n' \
+           "$mode" "$shrank" "$TOTAL"
+  else
+    printf 'FAIL [%s] only %s of %s scenarios lost any record: the crash\n' \
+           "$mode" "$shrank" "$TOTAL"
+    printf '     injection is not firing, and a matrix of completed runs\n'
+    printf '     proves nothing about recovery\n'
+    fail=$((fail + 1))
+  fi
 }
 
 run_pass lost
