@@ -19,9 +19,26 @@ fail=0
 # expect <bug> <caught|missed> <why>
 expect() {
   bug="$1"; want="$2"; why="$3"
-  out=$(WALKV_BUG="$bug" ./t/crash.sh 2>&1 | tail -1)
+  all=$(WALKV_BUG="$bug" ./t/crash.sh 2>&1)
+  out=$(printf '%s' "$all" | tail -1)
   n=$(printf '%s' "$out" | sed -n 's/.*checked, \([0-9]*\) failed/\1/p')
-  [ -n "$n" ] || n=0
+
+  # `[ -n "$n" ] || n=0` turned "the harness never reached its summary" into
+  # "zero scenarios failed", which the `missed` branch below reads as success.
+  # The asymmetry gave it away: a broken harness is a correct FAIL for a
+  # `caught` expectation and a false `ok` for all three `missed` ones. Proved
+  # by adding a defect that makes `bulk` return early, so crash.sh bails at
+  # "could not count I/O points" and prints no summary at all -- declared
+  # `missed`, it scored "ok ... missed, as expected".
+  #
+  # The sanity gate further down only covers the undefected run, so it cannot
+  # see a defect that breaks the harness itself.
+  if [ -z "$n" ]; then
+    fail=$((fail + 1))
+    printf 'FAIL   %-16s the harness printed no summary, so there is no verdict\n' "$bug"
+    printf '         last line was: %s\n' "$out"
+    return
+  fi
 
   if [ "$want" = caught ]; then
     if [ "$n" -gt 0 ]; then
@@ -58,8 +75,18 @@ fi
 # --- caught ------------------------------------------------------------------
 
 expect no-crc caught
-# Skips CRC verification during recovery, so a torn record is replayed as whole.
-# The torn-write pass produces exactly that, and the prefix check sees the result.
+# Skips CRC verification during recovery.
+#
+# The detector is the single `bitflip` scenario, not the torn-write pass this
+# note used to name. A torn write here always leaves the tail short in the
+# *body*, so `got < klen + payload` fires before any CRC is computed -- zero
+# of the 40 torn boundaries ever reach a CRC comparison, measured by printing
+# on every mismatch. WALKV_BUG=no-crc fails exactly one of the 219 scenarios,
+# and it is `[bitflip] CORRUPT at k19`.
+#
+# What that means for coverage: CRC is exercised by 1 scenario out of 219. A
+# full-length record with corrupt bytes -- what a real sector-granular torn
+# write produces -- does not occur in the matrix at all.
 
 expect truncate-cursor caught
 # Truncates at the read cursor instead of the last good record boundary, leaving a
