@@ -130,8 +130,7 @@ the process is about to be killed at an arbitrary point and an acknowledgement
 lost in a stdio buffer is one nobody can hold us to. It then crashes at every boundary of a batched run and requires the recovered prefix to cover the
 last `J` claimed.
 
-The prefix property itself is unchanged, and that is worth saying,
-not assuming: records still go out in order, so recovery truncating at the first bad
+The prefix property itself is unchanged, and that is worth stating explicitly: records still go out in order, so recovery truncating at the first bad
 one still leaves `k0..kj-1` with no hole. What batching changes is how much of
 that prefix is *owed*, not its shape.
 
