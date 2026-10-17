@@ -26,10 +26,11 @@ TOTAL=$(WALKV_COUNT_IO=1 "$WALKV" "$DB" bulk "$N" 2>&1 >/dev/null | awk '/io_poi
 # boundary the implementation admits to" -- a forgotten io_point() call
 # shrinks the matrix silently and the suite still reports every scenario it
 # ran as passing. A bulk of N puts is two boundaries each, the write and the
-# fsync, so the count is pinned rather than trusted.
-if [ "${TOTAL:-0}" -ne $((2 * N)) ]; then
+# fsync, plus one for the truncate that the recovery at open always performs,
+# so the count is pinned rather than trusted.
+if [ "${TOTAL:-0}" -ne $((2 * N + 1)) ]; then
   printf 'FAIL bulk reports %s io points for N=%s, expected %s: a boundary\n' \
-         "${TOTAL:-0}" "$N" "$((2 * N))"
+         "${TOTAL:-0}" "$N" "$((2 * N + 1))"
   printf '     was added or lost, and the scenario matrix is the wrong size\n'
   fail=$((fail + 1))
 fi
@@ -172,6 +173,101 @@ run_append_pass() {
 }
 
 run_append_pass
+
+# ------------------------------------------------------ crash during recovery
+#
+# Everything above crashes the writer and then recovers once, uninterrupted.
+# But recovery is itself I/O, and it is the one operation that runs after every
+# crash, so it has to survive being crashed as well. A recovery that half
+# finished and was then re-run is the normal case in the field: the machine
+# that lost power once loses it again while coming back up.
+#
+# Two properties, both about recovery rather than about the prefix:
+#
+#   re-runnable: recovering an already recovered log changes nothing.
+#   idempotent:  dying partway through a recovery and recovering again reaches
+#                exactly the state one uninterrupted recovery reaches.
+#
+# What gets compared is the log file itself, byte for byte. The index is a pure
+# function of those bytes, so two equal logs recover to the same store, and
+# nothing else about the dead process survives to be compared.
+#
+# The reference is a clean recovery of the same damaged log, which is a value
+# this harness does not choose: whatever one recovery does is the standard the
+# interrupted ones are held to.
+run_idem_pass() {
+  crashed=0
+  boundaries=0
+  i=1
+  while [ "$i" -le "$TOTAL" ]; do
+    rm -f "$DB"
+    WALKV_CRASH_AT="$i" WALKV_TORN=1 "$WALKV" "$DB" bulk "$N" >/dev/null 2>&1
+    cp "$DB" t/dmg.tmp
+
+    # The reference: one uninterrupted recovery of this damaged log. The same
+    # run reports how many I/O boundaries a recovery has, which is how many
+    # places the loop below has to kill it.
+    cp t/dmg.tmp t/ref.tmp
+    RT=$(WALKV_COUNT_IO=1 "$WALKV" t/ref.tmp recover 2>&1 >/dev/null | awk '/io_points/ {print $2}')
+    checked=$((checked + 1))
+    if [ "${RT:-0}" -lt 1 ]; then
+      printf 'FAIL [idem] crash_at=%-3s recovery reports %s I/O boundaries, so\n' "$i" "${RT:-0}"
+      printf '     there is nothing to crash and this scenario checks nothing\n'
+      fail=$((fail + 1))
+      i=$((i + 1))
+      continue
+    fi
+    boundaries=$((boundaries + RT))
+
+    # Re-runnable: recovery has to be a fixpoint.
+    cp t/ref.tmp t/again.tmp
+    "$WALKV" t/again.tmp recover >/dev/null 2>&1
+    checked=$((checked + 1))
+    if ! cmp -s t/ref.tmp t/again.tmp; then
+      printf 'FAIL [idem] crash_at=%-3s recovering an already recovered log changed it\n' "$i"
+      fail=$((fail + 1))
+    fi
+
+    # Idempotent: crash the recovery at each of its own boundaries, recover
+    # again, and demand the same bytes as the uninterrupted run.
+    r=1
+    while [ "$r" -le "$RT" ]; do
+      cp t/dmg.tmp "$DB"
+      WALKV_CRASH_AT="$r" "$WALKV" "$DB" recover >/dev/null 2>&1
+      [ $? -eq 99 ] && crashed=$((crashed + 1))
+      "$WALKV" "$DB" recover >/dev/null 2>&1
+      checked=$((checked + 1))
+      if ! cmp -s t/ref.tmp "$DB"; then
+        printf 'FAIL [idem] crash_at=%-3s killed at recovery boundary %s, then\n' "$i" "$r"
+        printf '     recovered again: %s bytes against the reference %s\n' \
+               "$(wc -c < "$DB")" "$(wc -c < t/ref.tmp)"
+        fail=$((fail + 1))
+      fi
+      r=$((r + 1))
+    done
+    i=$((i + 1))
+  done
+  rm -f t/dmg.tmp t/ref.tmp t/again.tmp
+
+  # Did the injection fire? The other passes ask this with a floor of half,
+  # because a crash at the last boundary legitimately costs nothing. Here it
+  # is exact: every recovery boundary must really kill the process, since a
+  # recovery that ran to completion and was then re-run is only the fixpoint
+  # check again, wearing the clothes of a crash test.
+  checked=$((checked + 1))
+  if [ "$crashed" -eq "$boundaries" ]; then
+    printf '[idem] recovery killed at all %s of its own boundaries, re-run, same bytes\n' \
+           "$boundaries"
+  else
+    printf 'FAIL [idem] only %s of %s recovery boundaries actually crashed: the\n' \
+           "$crashed" "$boundaries"
+    printf '     injection is not firing inside recovery, and comparing two\n'
+    printf '     uninterrupted recoveries proves nothing\n'
+    fail=$((fail + 1))
+  fi
+}
+
+run_idem_pass
 
 # ------------------------------------------------------------- batch commit
 #
