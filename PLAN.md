@@ -188,6 +188,37 @@ log exist at once, which is the crash window nothing else here reaches.
 - [ ] 11 `dm-log-writes` capture: loop device, dm target, run the workload,
       capture the full block-level write stream
       note: needs root and a loop device, so it runs on the host, not in a container
+      BLOCKED, 19 October 2026. Probed rather than assumed: this is a podman
+      container, `/dev/loop-control` and `/dev/mapper/control` are present and
+      `losetup` and `dmsetup` are installed under `/sbin`, and `sudo -n id`
+      does return uid 0. What is not available is permission to use any of it:
+      the one command that would have mattered, creating the loop devices and
+      the `log-writes` dm target, is refused by this session's command policy.
+      So the capture cannot be made here, and items 12 and 13 cannot start,
+      since both consume a log that 11 produces. Nothing partial was built
+      against the guess: a replay for a log format with no log to replay would
+      be the exact vacuous harness this project exists to argue against.
+      what unblocks it: a session on the host with permission to run
+      `losetup --show -f IMG` twice and
+      `dmsetup create NAME --table "0 SECTORS log-writes DATADEV LOGDEV"`.
+      The replay side needs no privilege and can be written in Python from
+      the kernel's own `Documentation/admin-guide/device-mapper/log-writes.rst`
+      rather than by building xfstests, which hard rule 5 and the no-foreign-
+      build-scripts rule both point away from.
+- [ ] 11a a non-root approximation, if 11 stays blocked: an `LD_PRELOAD` shim
+      over `write`/`pwrite`/`fsync`/`ftruncate`/`rename`/`unlink`, capturing
+      the stream at the libc boundary so walkv cannot be the thing reporting
+      on walkv, and a replay that reconstructs the files as of each flush and
+      DISCARDS the unflushed writes
+      why: that is the one thing `_exit` cannot do, and it is what makes
+           `no-fsync`, `ack-before-sync` and `compact-sync-late` all three
+           invisible today. It is weaker than 11, because it still trusts the
+           kernel to have done what it was told, but it moves the ceiling
+           rather than describing it.
+      note: not started. The honest cost is a mini-VFS in the replay, since
+            compaction renames and unlinks, so the capture has to replay a
+            namespace and not just a byte array. Worth it only if 11 cannot
+            be unblocked; 11 is strictly better and much less code.
 - [ ] 12 replay the captured log to every *flush* boundary, mount, recover,
       assert the invariants at each one
       why: this tests what the device really guaranteed, not what the process
