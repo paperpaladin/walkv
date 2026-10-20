@@ -346,6 +346,25 @@ stream and replay the device to every flush boundary, that needs root and a
 loop device, so it is the next milestone instead of something that runs in a
 container. See `PLAN.md`.
 
+## Running it
+
+`make test` is the documented path and the only one that rebuilds first. Two
+guards sit behind that sentence, both of them for traps that have already been
+sprung here.
+
+`t/crash.sh` refuses to run when `walkv.c` is newer than `./walkv`. It compiles
+nothing it tests, so invoked directly after an edit it reports a clean pass for
+the previous binary, and three mutations of a sibling project were each written
+down as surviving for exactly that reason.
+
+And every scratch path is per-run (`t/w$$.*`, removed by an `EXIT` trap). It
+used to be a fixed `t/db` plus nine fixed `t/*.tmp` names, which is the worst
+class of test harness there is: two concurrent runs feed each other their
+files. That is not hypothetical either. `make mutants` in the background and
+`make test` in the foreground produced 164 invented failures, among them
+`prefix went backwards: 3 -> 1`, which is the single output this project would
+most want to believe. Two concurrent runs now both report 704 and 0.
+
 ## Design notes
 
 Two deliberate corners, both marked `shortcut:` in the source:

@@ -45,6 +45,6 @@ overread: walkv.c walkv
 	@rm -f t/probe.tmp walkv-probe
 
 clean:
-	rm -f walkv walkv-asan walkv-probe t/db t/db.compact t/*.tmp
+	rm -f walkv walkv-asan walkv-probe t/probe.tmp t/w[0-9]*.*
 
 .PHONY: test test-asan overread mutants clean

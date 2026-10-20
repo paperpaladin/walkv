@@ -14,7 +14,27 @@ cd "$(dirname "$0")/.." || exit 1
 
 WALKV=${WALKV:-./walkv}
 N=${N:-20}
-DB=t/db
+
+# Every scratch path is per-run. It used to be a fixed t/db plus nine fixed
+# t/*.tmp names, which puts this harness in the worst class there is: two
+# concurrent runs feed each other their files, and the symptom is not an error
+# but a page of plausible crash-consistency failures. That happened once, with
+# make mutants in the background and make test in the foreground, and it
+# produced 164 invented failures including "prefix went backwards" -- the one
+# output this project would most want to believe.
+T=t/w$$
+DB=$T.db
+trap 'rm -f "$T".* ' EXIT HUP INT TERM
+
+# Run the thing that was built, not the thing lying around. This harness
+# compiles nothing it tests, so invoked directly after an edit it reports a
+# pass for the previous binary -- three mutations of a sibling repo were each
+# recorded as surviving that way. make test depends on the binary, so the
+# documented path is safe; this is for the undocumented one.
+if [ "$WALKV" = ./walkv ] && [ walkv.c -nt ./walkv ]; then
+  echo "walkv.c is newer than ./walkv: run make test, not t/crash.sh directly"
+  exit 1
+fi
 
 fail=0
 checked=0
@@ -202,13 +222,13 @@ run_idem_pass() {
   while [ "$i" -le "$TOTAL" ]; do
     rm -f "$DB"
     WALKV_CRASH_AT="$i" WALKV_TORN=1 "$WALKV" "$DB" bulk "$N" >/dev/null 2>&1
-    cp "$DB" t/dmg.tmp
+    cp "$DB" "$T".dmg
 
     # The reference: one uninterrupted recovery of this damaged log. The same
     # run reports how many I/O boundaries a recovery has, which is how many
     # places the loop below has to kill it.
-    cp t/dmg.tmp t/ref.tmp
-    RT=$(WALKV_COUNT_IO=1 "$WALKV" t/ref.tmp recover 2>&1 >/dev/null | awk '/io_points/ {print $2}')
+    cp "$T".dmg "$T".ref
+    RT=$(WALKV_COUNT_IO=1 "$WALKV" "$T".ref recover 2>&1 >/dev/null | awk '/io_points/ {print $2}')
     checked=$((checked + 1))
     if [ "${RT:-0}" -lt 1 ]; then
       printf 'FAIL [idem] crash_at=%-3s recovery reports %s I/O boundaries, so\n' "$i" "${RT:-0}"
@@ -220,10 +240,10 @@ run_idem_pass() {
     boundaries=$((boundaries + RT))
 
     # Re-runnable: recovery has to be a fixpoint.
-    cp t/ref.tmp t/again.tmp
-    "$WALKV" t/again.tmp recover >/dev/null 2>&1
+    cp "$T".ref "$T".again
+    "$WALKV" "$T".again recover >/dev/null 2>&1
     checked=$((checked + 1))
-    if ! cmp -s t/ref.tmp t/again.tmp; then
+    if ! cmp -s "$T".ref "$T".again; then
       printf 'FAIL [idem] crash_at=%-3s recovering an already recovered log changed it\n' "$i"
       fail=$((fail + 1))
     fi
@@ -232,22 +252,22 @@ run_idem_pass() {
     # again, and demand the same bytes as the uninterrupted run.
     r=1
     while [ "$r" -le "$RT" ]; do
-      cp t/dmg.tmp "$DB"
+      cp "$T".dmg "$DB"
       WALKV_CRASH_AT="$r" "$WALKV" "$DB" recover >/dev/null 2>&1
       [ $? -eq 99 ] && crashed=$((crashed + 1))
       "$WALKV" "$DB" recover >/dev/null 2>&1
       checked=$((checked + 1))
-      if ! cmp -s t/ref.tmp "$DB"; then
+      if ! cmp -s "$T".ref "$DB"; then
         printf 'FAIL [idem] crash_at=%-3s killed at recovery boundary %s, then\n' "$i" "$r"
         printf '     recovered again: %s bytes against the reference %s\n' \
-               "$(wc -c < "$DB")" "$(wc -c < t/ref.tmp)"
+               "$(wc -c < "$DB")" "$(wc -c < "$T".ref)"
         fail=$((fail + 1))
       fi
       r=$((r + 1))
     done
     i=$((i + 1))
   done
-  rm -f t/dmg.tmp t/ref.tmp t/again.tmp
+  rm -f "$T".dmg "$T".ref "$T".again
 
   # Did the injection fire? The other passes ask this with a floor of half,
   # because a crash at the last boundary legitimately costs nothing. Here it
@@ -312,14 +332,14 @@ run_batch_pass() {
   while [ "$i" -le "$BTOTAL" ]; do
     rm -f "$DB"
     if [ "$mode" = torn ]; then
-      WALKV_CRASH_AT="$i" WALKV_TORN=1 "$WALKV" "$DB" batch "$N" "$BATCH" >t/ack.tmp 2>/dev/null
+      WALKV_CRASH_AT="$i" WALKV_TORN=1 "$WALKV" "$DB" batch "$N" "$BATCH" >"$T".ack 2>/dev/null
     else
-      WALKV_CRASH_AT="$i" "$WALKV" "$DB" batch "$N" "$BATCH" >t/ack.tmp 2>/dev/null
+      WALKV_CRASH_AT="$i" "$WALKV" "$DB" batch "$N" "$BATCH" >"$T".ack 2>/dev/null
     fi
 
     # The highest J we told anyone was durable before dying. Empty means we
     # never acknowledged anything, so nothing is owed.
-    ack=$(awk '/^durable /{j=$2} END{print j+0}' t/ack.tmp)
+    ack=$(awk '/^durable /{j=$2} END{print j+0}' "$T".ack)
 
     out=$("$WALKV" "$DB" verify-prefix "$N" 2>&1)
     rc=$?
@@ -371,8 +391,8 @@ run_batch_pass torn
 # An acknowledgement must actually have been made at some point, or every
 # comparison above was against zero and proved nothing.
 rm -f "$DB"
-"$WALKV" "$DB" batch "$N" "$BATCH" >t/ack.tmp 2>/dev/null
-acks=$(grep -c '^durable ' t/ack.tmp)
+"$WALKV" "$DB" batch "$N" "$BATCH" >"$T".ack 2>/dev/null
+acks=$(grep -c '^durable ' "$T".ack)
 checked=$((checked + 1))
 if [ "$acks" -lt 2 ]; then
   printf 'FAIL [batch] a clean run acknowledged %s times; the durability checks are vacuous\n' "$acks"
@@ -383,7 +403,7 @@ fi
 out=$("$WALKV" "$DB" verify-prefix "$N")
 checked=$((checked + 1))
 [ "$out" = "prefix $N" ] || { printf 'FAIL [batch clean] got %s\n' "$out"; fail=$((fail + 1)); }
-rm -f t/ack.tmp
+rm -f "$T".ack
 
 # -------------------------------------------------------------- compaction
 #
@@ -434,7 +454,7 @@ else
 # t/model.py replays the same lines into a dict. Two `bulk` runs mean every key
 # is written twice, so compaction has real work: 2N + 2 records down to N - 2.
 rm -f "$DB" "$DB.compact"
-cat > t/ops.tmp <<EOF
+cat > "$T".ops <<EOF
 bulk $N
 bulk $N
 del k3
@@ -444,11 +464,11 @@ EOF
 "$WALKV" "$DB" bulk "$N" >/dev/null 2>&1
 "$WALKV" "$DB" del k3 >/dev/null 2>&1
 "$WALKV" "$DB" del k7 >/dev/null 2>&1
-cp "$DB" t/base.tmp
+cp "$DB" "$T".base
 
-before=$($PY t/model.py records t/base.tmp 2>&1)
+before=$($PY t/model.py records "$T".base 2>&1)
 checked=$((checked + 1))
-out=$($PY t/model.py check t/base.tmp t/ops.tmp 2>&1) || {
+out=$($PY t/model.py check "$T".base "$T".ops 2>&1) || {
   printf 'FAIL [compact] the uncompacted log already disagrees with the model: %s\n' "$out"
   printf '     every scenario below compares against this, so fix it first\n'
   fail=$((fail + 1))
@@ -460,7 +480,7 @@ out=$($PY t/model.py check t/base.tmp t/ops.tmp 2>&1) || {
 # crashing at that boundary would be vacuous: the log is already clean and the
 # recovery that follows has nothing to finish.
 restore_base() {
-  cp t/base.tmp "$DB"
+  cp "$T".base "$DB"
   printf 'zzzzzzzzzzzzzzzzzzzz' >> "$DB"
   rm -f "$DB.compact"
 }
@@ -508,7 +528,7 @@ else
   printf '[compact] %s records -> %s live, %s I/O boundaries\n' "$before" "$after" "$CTOTAL"
 fi
 checked=$((checked + 1))
-out=$($PY t/model.py check "$DB" t/ops.tmp 2>&1) || {
+out=$($PY t/model.py check "$DB" "$T".ops 2>&1) || {
   printf 'FAIL [compact] a clean compaction changed the state: %s\n' "$out"
   fail=$((fail + 1))
 }
@@ -536,19 +556,19 @@ run_compact_pass() {
 
     # Snapshot the post-crash filesystem state, both files, before anything
     # recovers: the nested loop below replays recovery from exactly here.
-    cp "$DB" t/cdmg.tmp
-    if [ -f "$DB.compact" ]; then cp "$DB.compact" t/ctmp.tmp
-    else rm -f t/ctmp.tmp; fi
+    cp "$DB" "$T".cdmg
+    if [ -f "$DB.compact" ]; then cp "$DB.compact" "$T".ctmp
+    else rm -f "$T".ctmp; fi
 
     # Recover, and count recovery's own boundaries while doing it. Recovery is
     # two mutating syscalls now rather than one -- drop the stray temp, then
     # truncate the tail -- which is what compaction took away from the
     # "idempotent by construction" argument that item 09 could still make.
     RT=$(WALKV_COUNT_IO=1 "$WALKV" "$DB" recover 2>&1 >/dev/null | awk '/io_points/ {print $2}')
-    cp "$DB" t/cref.tmp          # the uninterrupted recovery, the reference
+    cp "$DB" "$T".cref          # the uninterrupted recovery, the reference
 
     want_rt=1
-    [ -f t/ctmp.tmp ] && want_rt=2
+    [ -f "$T".ctmp ] && want_rt=2
     checked=$((checked + 1))
     if [ "${RT:-0}" -ne "$want_rt" ]; then
       printf 'FAIL [compact-%s] crash_at=%-3s recovery reports %s boundaries,\n' \
@@ -571,7 +591,7 @@ run_compact_pass() {
 
     # The model. Equality, not a prefix: compaction owes everything.
     checked=$((checked + 1))
-    if out=$($PY t/model.py check "$DB" t/ops.tmp 2>&1); then
+    if out=$($PY t/model.py check "$DB" "$T".ops 2>&1); then
       n=${out#ok }; n=${n% records}
       if [ "$n" = "$LIVE" ]; then committed=$((committed + 1))
       else rolled=$((rolled + 1)); fi
@@ -585,7 +605,7 @@ run_compact_pass() {
     # has moved the damage one operation into the future.
     "$WALKV" "$DB" compact >/dev/null 2>&1
     checked=$((checked + 1))
-    out=$($PY t/model.py check "$DB" t/ops.tmp 2>&1) || {
+    out=$($PY t/model.py check "$DB" "$T".ops 2>&1) || {
       printf 'FAIL [compact-%s] crash_at=%-3s a second, clean compaction of the\n' "$mode" "$i"
       printf '     recovered log got it wrong: %s\n' "$out"
       fail=$((fail + 1))
@@ -600,8 +620,8 @@ run_compact_pass() {
     # was already checked against the model two assertions ago.
     r=1
     while [ "$r" -le "${RT:-0}" ]; do
-      cp t/cdmg.tmp "$DB"
-      if [ -f t/ctmp.tmp ]; then cp t/ctmp.tmp "$DB.compact"
+      cp "$T".cdmg "$DB"
+      if [ -f "$T".ctmp ]; then cp "$T".ctmp "$DB.compact"
       else rm -f "$DB.compact"; fi
       WALKV_CRASH_AT="$r" "$WALKV" "$DB" recover >/dev/null 2>&1
       rc=$?
@@ -616,11 +636,11 @@ run_compact_pass() {
       fi
       "$WALKV" "$DB" recover >/dev/null 2>&1
       checked=$((checked + 1))
-      if ! cmp -s t/cref.tmp "$DB" || [ -e "$DB.compact" ]; then
+      if ! cmp -s "$T".cref "$DB" || [ -e "$DB.compact" ]; then
         printf 'FAIL [compact-%s] crash_at=%-3s killed at recovery boundary %s,\n' \
                "$mode" "$i" "$r"
         printf '     then recovered again: %s bytes against the reference %s%s\n' \
-               "$(wc -c < "$DB")" "$(wc -c < t/cref.tmp)" \
+               "$(wc -c < "$DB")" "$(wc -c < "$T".cref)" \
                "$([ -e "$DB.compact" ] && printf ', and a temp file left behind')"
         fail=$((fail + 1))
       fi
@@ -688,7 +708,7 @@ if [ "$CTOTAL" -gt 0 ]; then
   run_compact_pass lost
   run_compact_pass torn
 fi
-rm -f t/base.tmp t/ops.tmp t/cdmg.tmp t/ctmp.tmp t/cref.tmp "$DB.compact"
+rm -f "$T".base "$T".ops "$T".cdmg "$T".ctmp "$T".cref "$DB.compact"
 
 # A clean run must end with everything present.
 rm -f "$DB"
