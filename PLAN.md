@@ -2,8 +2,8 @@
 
 ## Contract
 
-`walkv DB {put,get,del,bulk,verify-prefix,recover}`. The on-disk log format is
-the part that must not change incompatibly:
+`walkv DB {put,get,del,bulk,batch,compact,verify-prefix,recover}`. The on-disk
+log format is the part that must not change incompatibly:
 
 ```
 u32 crc      CRC-32 of every byte after this field
@@ -21,23 +21,45 @@ present keys is `{k0..kj-1}` for some j, never a set with a gap.
 
 Plus monotonicity: `prefix(crash_at = i+1) >= prefix(crash_at = i)`.
 
+And, since item 10, a stronger statement for the one operation that rewrites
+rather than appends: a crash during compaction loses NOTHING. Compaction adds
+no information, so the recovered state must equal the state before it exactly,
+with no prefix weakening, at every boundary. `rename(2)` is the commit point
+and it is atomic, so the only two reachable outcomes are the whole old log and
+the whole new one. That equality is checked against a model dict rather than
+against walkv's own reader, because a workload with deletes in it has no
+prefix to check.
+
 ## Oracle
 
 Ranked by how little the author controls them:
 
 1. `dm-log-writes` replay to every block-level flush boundary, **not yet**,
    needs root. This is the real oracle and milestone 2 exists to reach it.
-2. `t/crash.sh`, process-level kill at every I/O boundary, including the
-   boundary inside recovery itself. 349 scenarios.
-3. ASan + UBSan over the recovery parser, which reads post-crash bytes.
-4. The monotonicity check, which catches ordering bugs the prefix check alone
+2. The filesystem as the kernel reports it: `test -f` after each crash, which
+   is what says whether the compaction window was really entered and whether a
+   temp file was leaked. Not negotiable with, and not written by this project.
+3. `t/model.py`, an independent reader of the record format plus a model of
+   the workload kept in a plain dict. Second implementation rather than
+   outside authority, so it ranks below the kernel: what it buys is that
+   recovery is no longer checked by walkv's own reader agreeing with walkv's
+   own writer. It is strict where walkv is lenient, and refuses any log with a
+   short or corrupt record.
+4. `t/crash.sh`, process-level kill at every I/O boundary, including the
+   boundary inside recovery itself. 704 scenarios.
+5. ASan + UBSan over the recovery parser, which reads post-crash bytes, with
+   `make overread` asserting that the sanitizer can still see an over-read
+   there at all.
+6. The monotonicity check, which catches ordering bugs the prefix check alone
    would pass.
 
 ## Non-goals
 
-Concurrency and locking. Compaction. Range scans. Transactions across multiple
-keys. Networking. Anything resembling a real database's feature list, this
-exists to be crashed, not to be used.
+Concurrency and locking. Range scans. Transactions across multiple keys.
+Networking. Anything resembling a real database's feature list, this exists to
+be crashed, not to be used. Compaction was on this list until item 10, and it
+came off it for one reason: it is the operation during which two copies of the
+log exist at once, which is the crash window nothing else here reaches.
 
 ## Commit sequence
 
@@ -109,8 +131,57 @@ exists to be crashed, not to be used.
               construction, which is the honest result here: the matrix is
               what covers item 10, where compaction makes recovery
               multi-step.
-- [ ] 10 log compaction, then crash at every boundary *during* compaction
+- [x] 10 log compaction, then crash at every boundary *during* compaction
       why: compaction is the single most dangerous operation in a log store
+      files: walkv.c t/crash.sh t/mutants.sh t/model.py Makefile
+      done: `compact` writes the live set to DB.compact, fsyncs it, renames it
+      over DB, fsyncs the directory. rename(2) is the commit point and it is
+      atomic, so the only two reachable outcomes are the old log and the new
+      one. 22 boundaries at N=20, crashed at every one in both modes, and then
+      the recovery that follows each crash crashed at every one of ITS
+      boundaries: 44 + 84 = 128 injected crashes, enumerated, not sampled.
+      349 -> 704 scenarios.
+      oracle: the kernel and an independent parser, because for the first time
+      in this repo the old check was not good enough. verify-prefix reads the
+      index recovery built, which is walkv agreeing with walkv, and with a
+      deleted key in the workload it reports a GAP and is the wrong question
+      anyway. So t/model.py parses the recovered log from the format comment
+      and compares it against a dict built by replaying the operations the
+      HARNESS asked for, and the invariant is equality rather than a prefix:
+      compaction rewrites what is already durable, so a crash during it may
+      lose nothing at all. The filesystem answers the other half, with
+      `test -f` after each crash.
+      proves: the window really was entered. 20 of the 22 boundaries left both
+      logs on disk at once, the two that cannot being the opening recovery and
+      the one after the rename, and both outcomes of the commit occurred,
+      21 rolled back and 1 committed. A harness that never fires inside that
+      window passes vacuously and is the defect to expect here.
+      found: a buffer larger than its data, the eighth in this collection.
+      recover() decoded every key into a `char key[MAX_KEY + 1]` -- 1025 bytes
+      for a two-byte key -- so a planted read one past the key printed
+      "3 keys" and nothing from either ASan or UBSan. With malloc(klen + 1)
+      the identical read is reported. `make overread` now compiles that probe
+      under -DWALKV_PROBE_OVERREAD and requires the sanitizer to see it, and
+      `make test` runs it, so rounding the buffer up again turns the suite red
+      instead of quietly turning the sanitizer off over the whole parser.
+      mutants: three caught and one deliberately not, and the division between
+      them is the argument that both oracles are load bearing.
+      compact-inplace rewrites the log where it lies: 36 model disagreements
+      per mode. compact-keep-tmp leaks the temp file, which the model CANNOT
+      see because the log is perfectly correct, so all 120 of its failures
+      come from `test -e`. compact-prefer-tmp promotes the uncommitted temp,
+      which the filesystem cannot see because there is nothing left over, so
+      all 72 come from the model. compact-sync-late commits before the fsync
+      that earns it -- the canonical compaction bug, a lost database on real
+      hardware -- and all 704 scenarios pass under it, for the same page-cache
+      reason no-fsync is invisible. Its boundary count is kept identical on
+      purpose so the matrix-size pin cannot take the credit.
+      missing: the nested recovery loop caught nothing the single recovery
+      missed. Recovery's two steps now (drop the stray temp, truncate the
+      tail) touch two different files and so commute, which makes it
+      idempotent by construction again. Written down rather than dressed up:
+      the loop is where an ordering bug between them would show, and it is
+      what makes "every boundary" literal.
 
 ### Milestone 2: the real oracle
 
@@ -137,5 +208,9 @@ exists to be crashed, not to be used.
   lands (batching) the invariant needs restating in terms of batches, and once
   15 lands (concurrency) it needs replacing with linearizability. Worth getting
   the batch version right before adding concurrency.
+  Item 10 answered part of this by accident: a workload with overwrites and
+  deletes has no prefix at all, and the model-dict comparison is what replaces
+  it. The same comparison is what item 15 will need, since a linearizability
+  check is a statement about a history rather than about an ordering of keys.
 - Whether 08's planted bug should be a build flag or a runtime env var. Runtime
   is easier to test but means shipping known-broken code in the binary.

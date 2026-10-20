@@ -385,6 +385,311 @@ checked=$((checked + 1))
 [ "$out" = "prefix $N" ] || { printf 'FAIL [batch clean] got %s\n' "$out"; fail=$((fail + 1)); }
 rm -f t/ack.tmp
 
+# -------------------------------------------------------------- compaction
+#
+# Compaction rewrites the log as one record per live key, and it is the most
+# dangerous thing a log store does, because for the length of it the old log
+# and the new one BOTH EXIST and exactly one of them is the truth. Every
+# scenario above has had one file to get right; these have two.
+#
+# Three things are different about this pass.
+#
+# The oracle is outside walkv. Every check up to here has been walkv's reader
+# agreeing with walkv's writer: verify-prefix reads the index that recovery
+# built. Here the log is parsed by t/model.py, a second implementation of the
+# record format written from the layout comment in walkv.c, and compared
+# against a dict that t/model.py builds by replaying the operations THIS SCRIPT
+# ASKED FOR. Nothing walkv printed feeds that dict. t/model.py is also strict
+# where walkv is deliberately lenient: it refuses a log with any short or
+# corrupt record, where walkv stops at the first one, so a recovery that
+# truncated nothing cannot be agreed with.
+#
+# The invariant is equality, not a prefix. Compaction adds no information: it
+# rewrites what is already durable. So a crash during it may lose NOTHING, and
+# the recovered state must equal the model exactly, at every boundary. That is
+# a far more falsifiable claim than "some prefix survived", and it is the
+# reason the workload can now include overwrites and deletes, which have no
+# prefix to be checked against.
+#
+# And the window is asserted to have been reached. The interesting boundaries
+# are the ones where both logs are on disk at once; a harness that never fires
+# inside that window passes vacuously. So after each crash this asks the
+# KERNEL, with test -f, whether both files are there, and requires the count to
+# come out at every boundary but the two that cannot qualify.
+PY=${PY:-python3}
+LIVE=$((N - 2))                  # the workload deletes two of the N keys
+
+# t/model.py is the only external authority in this pass, so a missing python3
+# is a failure and not a skip: without it these scenarios would report success
+# having compared nothing.
+if ! command -v "$PY" >/dev/null 2>&1; then
+  printf 'FAIL [compact] no %s: t/model.py is the only external oracle for\n' "$PY"
+  printf '     this pass, so skipping it would leave the scenarios checking\n'
+  printf '     nothing and reporting success\n'
+  fail=$((fail + 1))
+  CTOTAL=0
+else
+
+# The workload, written down once and handed to both sides. walkv executes it;
+# t/model.py replays the same lines into a dict. Two `bulk` runs mean every key
+# is written twice, so compaction has real work: 2N + 2 records down to N - 2.
+rm -f "$DB" "$DB.compact"
+cat > t/ops.tmp <<EOF
+bulk $N
+bulk $N
+del k3
+del k7
+EOF
+"$WALKV" "$DB" bulk "$N" >/dev/null 2>&1
+"$WALKV" "$DB" bulk "$N" >/dev/null 2>&1
+"$WALKV" "$DB" del k3 >/dev/null 2>&1
+"$WALKV" "$DB" del k7 >/dev/null 2>&1
+cp "$DB" t/base.tmp
+
+before=$($PY t/model.py records t/base.tmp 2>&1)
+checked=$((checked + 1))
+out=$($PY t/model.py check t/base.tmp t/ops.tmp 2>&1) || {
+  printf 'FAIL [compact] the uncompacted log already disagrees with the model: %s\n' "$out"
+  printf '     every scenario below compares against this, so fix it first\n'
+  fail=$((fail + 1))
+}
+
+# Every scenario starts from the base log with a torn tail glued on. Recovery
+# has two mutating syscalls now -- drop a stray temp, then truncate the tail --
+# and without a tail to drop the second one has no work in this pass, so
+# crashing at that boundary would be vacuous: the log is already clean and the
+# recovery that follows has nothing to finish.
+restore_base() {
+  cp t/base.tmp "$DB"
+  printf 'zzzzzzzzzzzzzzzzzzzz' >> "$DB"
+  rm -f "$DB.compact"
+}
+
+# And the tail must really be a tail, i.e. something t/model.py refuses, or
+# the paragraph above is wishful. model.py is strict where walkv is lenient
+# exactly so this question has an answer.
+restore_base
+checked=$((checked + 1))
+if out=$($PY t/model.py records "$DB" 2>&1); then
+  printf 'FAIL [compact] the glued-on tail parses as a clean log (%s records),
+' "$out"
+  printf '     so recovery has nothing to truncate and its second boundary is
+'
+  printf '     vacuous in every scenario below
+'
+  fail=$((fail + 1))
+fi
+
+# How many I/O boundaries does a compaction have? Counted by the code under
+# test, so pinned: 1 for the recovery that `compact` opens with, one per live
+# record, one for the fsync of the new log, one for the rename that commits it,
+# one for the directory fsync.
+restore_base
+CTOTAL=$(WALKV_COUNT_IO=1 "$WALKV" "$DB" compact 2>&1 >/dev/null | awk '/io_points/ {print $2}')
+checked=$((checked + 1))
+if [ "${CTOTAL:-0}" -ne $((LIVE + 4)) ]; then
+  printf 'FAIL [compact] reports %s io points for %s live records, expected %s:\n' \
+         "${CTOTAL:-0}" "$LIVE" "$((LIVE + 4))"
+  printf '     a boundary was added or lost and the matrix is the wrong size\n'
+  fail=$((fail + 1))
+  CTOTAL=${CTOTAL:-0}
+fi
+
+# That counting run was a real compaction. Did it do anything? A "compaction"
+# that rewrote every record would satisfy every assertion below.
+after=$($PY t/model.py records "$DB" 2>&1)
+checked=$((checked + 1))
+if [ "$after" != "$LIVE" ] || [ "$before" -le "$after" ]; then
+  printf 'FAIL [compact] %s records became %s, expected %s live out of %s:\n' \
+         "$before" "$after" "$LIVE" "$before"
+  printf '     compaction is not collapsing anything, so crashing it proves nothing\n'
+  fail=$((fail + 1))
+else
+  printf '[compact] %s records -> %s live, %s I/O boundaries\n' "$before" "$after" "$CTOTAL"
+fi
+checked=$((checked + 1))
+out=$($PY t/model.py check "$DB" t/ops.tmp 2>&1) || {
+  printf 'FAIL [compact] a clean compaction changed the state: %s\n' "$out"
+  fail=$((fail + 1))
+}
+
+fi
+
+run_compact_pass() {
+  mode="$1"
+  both=0          # crashes that landed with the old and new log both on disk
+  committed=0     # scenarios that recovered to the compacted log
+  rolled=0        # scenarios that recovered to the original log
+  rboundaries=0   # recovery boundaries offered by those post-crash states
+  rcrashed=0      # ... and how many of them really killed the process
+  i=1
+  while [ "$i" -le "$CTOTAL" ]; do
+    restore_base
+    if [ "$mode" = torn ]; then
+      WALKV_CRASH_AT="$i" WALKV_TORN=1 "$WALKV" "$DB" compact >/dev/null 2>&1
+    else
+      WALKV_CRASH_AT="$i" "$WALKV" "$DB" compact >/dev/null 2>&1
+    fi
+
+    # Filesystem state as the kernel reports it, before anything recovers.
+    if [ -f "$DB" ] && [ -f "$DB.compact" ]; then both=$((both + 1)); fi
+
+    # Snapshot the post-crash filesystem state, both files, before anything
+    # recovers: the nested loop below replays recovery from exactly here.
+    cp "$DB" t/cdmg.tmp
+    if [ -f "$DB.compact" ]; then cp "$DB.compact" t/ctmp.tmp
+    else rm -f t/ctmp.tmp; fi
+
+    # Recover, and count recovery's own boundaries while doing it. Recovery is
+    # two mutating syscalls now rather than one -- drop the stray temp, then
+    # truncate the tail -- which is what compaction took away from the
+    # "idempotent by construction" argument that item 09 could still make.
+    RT=$(WALKV_COUNT_IO=1 "$WALKV" "$DB" recover 2>&1 >/dev/null | awk '/io_points/ {print $2}')
+    cp "$DB" t/cref.tmp          # the uninterrupted recovery, the reference
+
+    want_rt=1
+    [ -f t/ctmp.tmp ] && want_rt=2
+    checked=$((checked + 1))
+    if [ "${RT:-0}" -ne "$want_rt" ]; then
+      printf 'FAIL [compact-%s] crash_at=%-3s recovery reports %s boundaries,\n' \
+             "$mode" "$i" "${RT:-0}"
+      printf '     expected %s (the truncate, plus the unlink when a temp is\n' "$want_rt"
+      printf '     present): the nested loop below is the wrong size\n'
+      fail=$((fail + 1))
+    fi
+    rboundaries=$((rboundaries + ${RT:-0}))
+
+    # A leftover temp file is not harmless. It is a disk leak, and the next
+    # compaction's O_TRUNC is the only thing that would ever clear it. The log
+    # is perfectly correct in that case, so this is the one check that sees it.
+    checked=$((checked + 1))
+    if [ -e "$DB.compact" ]; then
+      printf 'FAIL [compact-%s] crash_at=%-3s recovery left %s behind\n' \
+             "$mode" "$i" "$DB.compact"
+      fail=$((fail + 1))
+    fi
+
+    # The model. Equality, not a prefix: compaction owes everything.
+    checked=$((checked + 1))
+    if out=$($PY t/model.py check "$DB" t/ops.tmp 2>&1); then
+      n=${out#ok }; n=${n% records}
+      if [ "$n" = "$LIVE" ]; then committed=$((committed + 1))
+      else rolled=$((rolled + 1)); fi
+    else
+      printf 'FAIL [compact-%s] crash_at=%-3s %s\n' "$mode" "$i" "$out"
+      fail=$((fail + 1))
+    fi
+
+    # And the recovered log must still be compactable. A crash during
+    # compaction that leaves the store readable but no longer able to compact
+    # has moved the damage one operation into the future.
+    "$WALKV" "$DB" compact >/dev/null 2>&1
+    checked=$((checked + 1))
+    out=$($PY t/model.py check "$DB" t/ops.tmp 2>&1) || {
+      printf 'FAIL [compact-%s] crash_at=%-3s a second, clean compaction of the\n' "$mode" "$i"
+      printf '     recovered log got it wrong: %s\n' "$out"
+      fail=$((fail + 1))
+    }
+
+    # And now crash the RECOVERY FROM this crash, at each of its own
+    # boundaries, and demand the same bytes as the uninterrupted recovery
+    # above. This is the pair of crashes that happens in the field: the
+    # machine loses power during a compaction and loses it again while
+    # coming back up. The reference is a value this script does not choose --
+    # whatever one recovery of this exact pair of files produces -- and it
+    # was already checked against the model two assertions ago.
+    r=1
+    while [ "$r" -le "${RT:-0}" ]; do
+      cp t/cdmg.tmp "$DB"
+      if [ -f t/ctmp.tmp ]; then cp t/ctmp.tmp "$DB.compact"
+      else rm -f "$DB.compact"; fi
+      WALKV_CRASH_AT="$r" "$WALKV" "$DB" recover >/dev/null 2>&1
+      rc=$?
+      [ "$rc" -eq 99 ] && rcrashed=$((rcrashed + 1))
+      checked=$((checked + 1))
+      if [ "$rc" -ne 99 ]; then
+        printf 'FAIL [compact-%s] crash_at=%-3s recovery boundary %s exited %s,\n' \
+               "$mode" "$i" "$r" "$rc"
+        printf '     not 99: the injection did not fire inside this recovery, so\n'
+        printf '     re-running it only compares two uninterrupted recoveries\n'
+        fail=$((fail + 1))
+      fi
+      "$WALKV" "$DB" recover >/dev/null 2>&1
+      checked=$((checked + 1))
+      if ! cmp -s t/cref.tmp "$DB" || [ -e "$DB.compact" ]; then
+        printf 'FAIL [compact-%s] crash_at=%-3s killed at recovery boundary %s,\n' \
+               "$mode" "$i" "$r"
+        printf '     then recovered again: %s bytes against the reference %s%s\n' \
+               "$(wc -c < "$DB")" "$(wc -c < t/cref.tmp)" \
+               "$([ -e "$DB.compact" ] && printf ', and a temp file left behind')"
+        fail=$((fail + 1))
+      fi
+      r=$((r + 1))
+    done
+    i=$((i + 1))
+  done
+
+  # DID THE CRASH LAND IN THE DANGEROUS WINDOW? Two boundaries cannot: the
+  # first, which is the recovery `compact` opens with and runs before the temp
+  # file is created, and the last, which is after the rename has already
+  # consumed the temp name. Every other one must, and an injection that never
+  # fires makes this zero.
+  checked=$((checked + 1))
+  if [ "$both" -eq $((CTOTAL - 2)) ]; then
+    printf '[compact-%s] %s of %s crashes left the old and new log on disk at once\n' \
+           "$mode" "$both" "$CTOTAL"
+  else
+    printf 'FAIL [compact-%s] %s of %s crashes left both logs on disk, expected %s:\n' \
+           "$mode" "$both" "$CTOTAL" "$((CTOTAL - 2))"
+    printf '     the only boundaries that cannot are the opening recovery and\n'
+    printf '     the one after the rename. If this is 0 the injection never\n'
+    printf '     fired inside compaction and the whole pass is vacuous\n'
+    fail=$((fail + 1))
+  fi
+
+  # Every recovery boundary must really have killed the process. Same exact
+  # floor as the [idem] pass rather than the half the writer passes use: a
+  # recovery that ran to completion and was then re-run is the fixpoint check
+  # again in borrowed clothes, not a crash test.
+  checked=$((checked + 1))
+  if [ "$rcrashed" -eq "$rboundaries" ] && [ "$rboundaries" -gt "$CTOTAL" ]; then
+    printf '[compact-%s] the recovery from each was killed at all %s of its own
+' \
+           "$mode" "$rboundaries"
+    printf '[compact-%s] boundaries, re-run, and reached the same bytes
+' "$mode"
+  else
+    printf 'FAIL [compact-%s] %s of %s recovery boundaries crashed, and %s
+' \
+           "$mode" "$rcrashed" "$rboundaries" "$rboundaries"
+    printf '     boundaries over %s scenarios means the two-step recovery that
+' "$CTOTAL"
+    printf '     a stray temp file creates was never reached
+'
+    fail=$((fail + 1))
+  fi
+
+  # Both outcomes have to occur, or one half of the claim is untested. rename
+  # is the commit point: crash before it and the state is the old log, crash
+  # after it and the state is the new one, and the model says they are equal.
+  checked=$((checked + 1))
+  if [ "$committed" -gt 0 ] && [ "$rolled" -gt 0 ]; then
+    printf '[compact-%s] %s rolled back, %s committed, model agreed with all %s\n' \
+           "$mode" "$rolled" "$committed" "$CTOTAL"
+  else
+    printf 'FAIL [compact-%s] %s committed and %s rolled back: only one side of\n' \
+           "$mode" "$committed" "$rolled"
+    printf '     the rename was ever observed, so the commit point is untested\n'
+    fail=$((fail + 1))
+  fi
+}
+
+if [ "$CTOTAL" -gt 0 ]; then
+  run_compact_pass lost
+  run_compact_pass torn
+fi
+rm -f t/base.tmp t/ops.tmp t/cdmg.tmp t/ctmp.tmp t/cref.tmp "$DB.compact"
+
 # A clean run must end with everything present.
 rm -f "$DB"
 "$WALKV" "$DB" bulk "$N" >/dev/null 2>&1

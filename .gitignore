@@ -2,3 +2,4 @@
 /walkv-asan
 t/db
 *.tmp
+/walkv-probe
